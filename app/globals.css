@@ -1,104 +1,113 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:where(.dark, .dark *));
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-/* ---- Design tokens (light) ---- */
-:root {
-  --bg: #f6f7f9;
-  --surface: #ffffff;
-  --surface-2: #f0f2f5;
-  --border: #e2e5ea;
-  --text: #0f1419;
-  --muted: #5d6673;
-  --subtle: #8a93a0;
-  --accent: #2f6fed;
-  --accent-fg: #ffffff;
-  --up: #0c8a4d;
-  --down: #c93030;
-  --up-soft: rgb(15 157 88 / 0.12);
-  --down-soft: rgb(217 58 58 / 0.12);
-  --flash-up: rgb(15 157 88 / 0.18);
-  --flash-down: rgb(217 58 58 / 0.18);
-  --warn: #a5650c;
-  --ring: rgb(47 111 237 / 0.55);
-  color-scheme: light;
-}
-
-/* ---- Design tokens (dark, default) ---- */
-.dark {
-  --bg: #0b0e12;
-  --surface: #12161c;
-  --surface-2: #181d25;
-  --border: #232a34;
-  --text: #e6e9ee;
-  --muted: #95a0ae;
-  --subtle: #6f7987;
-  --accent: #4c8dff;
-  --accent-fg: #0b0e12;
-  --up: #2ebd85;
-  --down: #f0525a;
-  --up-soft: rgb(46 189 133 / 0.14);
-  --down-soft: rgb(240 82 90 / 0.14);
-  --flash-up: rgb(46 189 133 / 0.22);
-  --flash-down: rgb(240 82 90 / 0.22);
-  --warn: #e0a83a;
-  --ring: rgb(76 141 255 / 0.6);
+/* ---------------------------------------------------------------- */
+/* Theme tokens. Dark is the default; light is set by data-theme.   */
+/* ---------------------------------------------------------------- */
+:root,
+[data-theme="dark"] {
+  --canvas: #090b0e;
+  --panel: #0f1217;
+  --row-hover: #161b22;
+  --line: #1e242d;
+  --line-strong: #2b333e;
+  --fg: #f1f5f9;
+  --fg-2: #8b949e;
+  --fg-3: #484f58;
+  --gain: #10b981;
+  --gain-tint: #10b9811a;
+  --loss: #ef4444;
+  --loss-tint: #ef44441a;
+  --alert: #f59e0b;
+  --alert-tint: #f59e0b1f;
+  --ring: #8b949e;
   color-scheme: dark;
 }
 
+[data-theme="light"] {
+  --canvas: #f4f6f8;
+  --panel: #ffffff;
+  --row-hover: #f1f5f9;
+  --line: #dce1e7;
+  --line-strong: #c3cad3;
+  --fg: #0f172a;
+  --fg-2: #475569;
+  --fg-3: #94a3b8;
+  --gain: #059669;
+  --gain-tint: #05966914;
+  --loss: #dc2626;
+  --loss-tint: #dc262614;
+  --alert: #b45309;
+  --alert-tint: #b4530914;
+  --ring: #475569;
+  color-scheme: light;
+}
+
 @theme inline {
-  --color-bg: var(--bg);
-  --color-surface: var(--surface);
-  --color-surface-2: var(--surface-2);
-  --color-border: var(--border);
-  --color-text: var(--text);
-  --color-muted: var(--muted);
-  --color-subtle: var(--subtle);
-  --color-accent: var(--accent);
-  --color-accent-fg: var(--accent-fg);
-  --color-up: var(--up);
-  --color-down: var(--down);
-  --color-up-soft: var(--up-soft);
-  --color-down-soft: var(--down-soft);
-  --color-warn: var(--warn);
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-row-hover: var(--row-hover);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-gain: var(--gain);
+  --color-gain-tint: var(--gain-tint);
+  --color-loss: var(--loss);
+  --color-loss-tint: var(--loss-tint);
+  --color-alert: var(--alert);
+  --color-alert-tint: var(--alert-tint);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 html,
 body {
-  background: var(--bg);
-  color: var(--text);
+  background: var(--canvas);
+  color: var(--fg);
 }
 
 body {
   font-family: var(--font-sans);
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Every numeric cell: monospace + tabular figures, so columns don't jitter on ticks. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 0;
 }
 
 :focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
+  outline: 1px solid var(--ring);
+  outline-offset: 1px;
 }
 
-/* Live tick flash: the overlay span is re-keyed on every price change. */
-@keyframes flash-up {
-  from { background-color: var(--flash-up); }
+/* Live tick flash: the overlay span gets a new key on every price change. */
+@keyframes flash-gain {
+  from { background-color: var(--gain-tint); }
   to { background-color: transparent; }
 }
-@keyframes flash-down {
-  from { background-color: var(--flash-down); }
+@keyframes flash-loss {
+  from { background-color: var(--loss-tint); }
   to { background-color: transparent; }
 }
-.flash-up { animation: flash-up 700ms ease-out both; }
-.flash-down { animation: flash-down 700ms ease-out both; }
+.flash-gain { animation: flash-gain 600ms ease-out both; }
+.flash-loss { animation: flash-loss 600ms ease-out both; }
 
-@keyframes pulse-dot {
+@keyframes blink {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
+  50% { opacity: 0.3; }
 }
-.pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+.blink { animation: blink 1.2s steps(2, jump-none) infinite; }
 
 @media (prefers-reduced-motion: reduce) {
-  .flash-up, .flash-down, .pulse-dot { animation: none; }
+  .flash-gain, .flash-loss, .blink { animation: none; }
 }
+
+input[type="search"]::-webkit-search-cancel-button { display: none; }

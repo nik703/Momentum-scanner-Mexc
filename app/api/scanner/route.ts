@@ -1,4 +1,4 @@
-import { buildBootstrap } from "@/lib/mexc.server";
+import { buildBootstrap } from "@/lib/mexc";
 import type { BootstrapPayload } from "@/lib/types";
 
 export const runtime = "nodejs";

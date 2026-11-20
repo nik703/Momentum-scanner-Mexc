@@ -2,13 +2,12 @@
 
 import { useId, useRef, type KeyboardEvent, type ReactNode } from "react";
 
-function cx(...parts: Array<string | false | null | undefined>) {
+export function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
-export { cx };
 
 /* ------------------------------------------------------------------ */
-/* SegmentedControl: WAI-ARIA radiogroup with roving tabindex + arrows */
+/* SegmentedControl: WAI-ARIA radiogroup, roving tabindex, arrow keys   */
 /* ------------------------------------------------------------------ */
 
 export interface SegmentOption<T extends string> {
@@ -22,15 +21,15 @@ export function SegmentedControl<T extends string>({
   value,
   options,
   onChange,
-  size = "md",
+  mono = false,
 }: {
   label: string;
   value: T;
   options: readonly SegmentOption<T>[];
   onChange: (v: T) => void;
-  size?: "sm" | "md";
+  mono?: boolean;
 }) {
-  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const refs = useRef<Array<HTMLButtonElement | null>>([]);
   const idx = Math.max(0, options.findIndex((o) => o.value === value));
 
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
@@ -48,7 +47,7 @@ export function SegmentedControl<T extends string>({
       role="radiogroup"
       aria-label={label}
       onKeyDown={onKeyDown}
-      className="inline-flex shrink-0 items-center rounded-md border border-border bg-surface-2 p-0.5"
+      className="inline-flex h-7 shrink-0 items-stretch overflow-hidden rounded-[3px] border border-line"
     >
       {options.map((o, i) => {
         const active = o.value === value;
@@ -65,9 +64,9 @@ export function SegmentedControl<T extends string>({
             title={o.hint}
             onClick={() => onChange(o.value)}
             className={cx(
-              "rounded-[5px] font-medium tabular-nums transition-colors",
-              size === "sm" ? "px-2 py-0.5 text-xs" : "px-2.5 py-1 text-xs sm:text-sm",
-              active ? "bg-surface text-text shadow-sm ring-1 ring-border" : "text-muted hover:text-text",
+              "px-2 text-[11.5px] font-medium transition-colors [&+&]:border-l [&+&]:border-line",
+              mono && "num",
+              active ? "bg-row-hover text-fg" : "text-fg-2 hover:text-fg",
             )}
           >
             {o.label}
@@ -79,7 +78,7 @@ export function SegmentedControl<T extends string>({
 }
 
 /* ------------------------------------------------------------------ */
-/* Switch: role="switch" button                                        */
+/* Switch: role="switch"                                               */
 /* ------------------------------------------------------------------ */
 
 export function Switch({
@@ -100,19 +99,19 @@ export function Switch({
       aria-checked={checked}
       aria-label={label}
       onClick={() => onChange(!checked)}
-      className="group inline-flex items-center gap-2 rounded-md px-1.5 py-1 text-xs font-medium text-muted hover:text-text"
+      className="inline-flex h-7 items-center gap-1.5 px-2 text-[11.5px] font-medium text-fg-2 hover:text-fg"
     >
       <span
         aria-hidden
         className={cx(
-          "relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors",
-          checked ? "border-accent bg-accent" : "border-border bg-surface-2",
+          "relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full border transition-colors",
+          checked ? "border-gain bg-gain-tint" : "border-line-strong bg-canvas",
         )}
       >
         <span
           className={cx(
-            "absolute h-3 w-3 rounded-full shadow transition-transform",
-            checked ? "translate-x-3.5 bg-accent-fg" : "translate-x-0.5 bg-subtle",
+            "absolute h-2 w-2 rounded-full transition-transform",
+            checked ? "translate-x-3 bg-gain" : "translate-x-0.5 bg-fg-3",
           )}
         />
       </span>
@@ -122,7 +121,7 @@ export function Switch({
 }
 
 /* ------------------------------------------------------------------ */
-/* Tooltip: CSS-only, shows on hover and keyboard focus                */
+/* Tooltip: CSS only; shows on hover and on keyboard focus             */
 /* ------------------------------------------------------------------ */
 
 export function Tooltip({ content, children }: { content: string; children: ReactNode }) {
@@ -133,7 +132,7 @@ export function Tooltip({ content, children }: { content: string; children: Reac
       <span
         id={id}
         role="tooltip"
-        className="pointer-events-none absolute left-1/2 top-full z-30 mt-1.5 hidden -translate-x-1/2 whitespace-nowrap rounded border border-border bg-surface px-2 py-1 text-[11px] font-normal text-text shadow-lg group-hover/tt:block group-focus-within/tt:block"
+        className="pointer-events-none absolute right-0 top-full z-50 mt-1 hidden whitespace-nowrap rounded-[3px] border border-line bg-panel px-1.5 py-0.5 text-[11px] text-fg group-hover/tt:block group-focus-within/tt:block"
       >
         {content}
       </span>
@@ -150,21 +149,20 @@ export function Badge({
   children,
   className,
 }: {
-  tone?: "neutral" | "up" | "down" | "accent" | "warn";
+  tone?: "neutral" | "gain" | "loss" | "alert";
   children: ReactNode;
   className?: string;
 }) {
   const tones = {
-    neutral: "bg-surface-2 text-muted border-border",
-    up: "bg-up-soft text-up border-transparent",
-    down: "bg-down-soft text-down border-transparent",
-    accent: "bg-accent/15 text-accent border-transparent",
-    warn: "bg-warn/15 text-warn border-transparent",
+    neutral: "border-line text-fg-2",
+    gain: "border-transparent bg-gain-tint text-gain",
+    loss: "border-transparent bg-loss-tint text-loss",
+    alert: "border-transparent bg-alert-tint text-alert",
   } as const;
   return (
     <span
       className={cx(
-        "inline-flex items-center rounded border px-1.5 py-px text-[10px] font-semibold uppercase leading-4 tracking-wide",
+        "num inline-flex items-center rounded-[2px] border px-1 text-[9.5px] font-semibold uppercase leading-[14px] tracking-wider",
         tones[tone],
         className,
       )}
@@ -174,14 +172,8 @@ export function Badge({
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Kbd                                                                 */
-/* ------------------------------------------------------------------ */
-
 export function Kbd({ children }: { children: ReactNode }) {
   return (
-    <kbd className="rounded border border-border bg-surface-2 px-1 font-mono text-[10px] leading-4 text-subtle">
-      {children}
-    </kbd>
+    <kbd className="num rounded-[2px] border border-line px-1 text-[10px] leading-[14px] text-fg-3">{children}</kbd>
   );
 }

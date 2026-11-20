@@ -7,10 +7,32 @@ import type { BootstrapPayload } from "@/lib/types";
 
 const RECONCILE_MS = 60_000;
 
+const FETCH_TIMEOUT_MS = 20_000;
+
+function isBootstrapPayload(v: unknown): v is BootstrapPayload {
+  if (typeof v !== "object" || v === null) return false;
+  const p = v as Partial<BootstrapPayload>;
+  return typeof p.generatedAt === "number" && Array.isArray(p.symbols);
+}
+
 async function fetchBootstrap(): Promise<BootstrapPayload> {
-  const res = await fetch("/api/scanner", { cache: "no-store" });
-  if (!res.ok) throw new Error(`Bootstrap failed (HTTP ${res.status})`);
-  return (await res.json()) as BootstrapPayload;
+  let res: Response;
+  try {
+    res = await fetch("/api/scanner", { cache: "no-store", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  } catch (e) {
+    const timedOut = e instanceof DOMException && e.name === "TimeoutError";
+    throw new Error(timedOut ? "Bootstrap request timed out" : "Network unavailable");
+  }
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail =
+      typeof body === "object" && body !== null && "error" in body && typeof body.error === "string"
+        ? body.error
+        : `HTTP ${res.status}`;
+    throw new Error(`Bootstrap failed: ${detail}`);
+  }
+  if (!isBootstrapPayload(body) || body.symbols.length === 0) throw new Error("Bootstrap returned no contracts");
+  return body;
 }
 
 /**

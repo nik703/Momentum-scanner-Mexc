@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeTf, rollCandles, liveDeltaTurnover, CANDLE_MS, type SymbolState } from "./calc.ts";
+import { computeTf, rollCandles, liveDeltaTurnover, CANDLE_MS, type SymbolState } from "./calculator.ts";
 
 function mk(len: number, amount = 100): SymbolState {
   const t0 = 1_700_000_100_000 - (1_700_000_100_000 % CANDLE_MS);

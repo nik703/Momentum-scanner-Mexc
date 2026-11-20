@@ -1,4 +1,4 @@
-import { computeTf, liveDeltaTurnover, rollCandles, type SymbolState } from "./calc.ts";
+import { computeTf, liveDeltaTurnover, rollCandles, type SymbolState } from "./calculator.ts";
 import type { BootstrapPayload, ScannerRow, WsStatus } from "./types.ts";
 
 export interface ScannerSnapshot {
@@ -107,6 +107,7 @@ export class ScannerStore {
   applyTickers(ticks: WsTicker[]) {
     let touched = false;
     for (const tk of ticks) {
+      if (typeof tk !== "object" || tk === null || typeof tk.symbol !== "string") continue;
       const st = this.syms.get(tk.symbol);
       if (!st || !(tk.lastPrice > 0)) continue;
       st.price = tk.lastPrice;

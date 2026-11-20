@@ -1,100 +1,108 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Top15Tracker } from "@/lib/alerts";
+import { evaluateTop10Entries, seedKnownTop15 } from "@/lib/alerts";
 import { playChime } from "@/lib/audio";
 import type { Timeframe } from "@/lib/types";
 
-/** How long a NEW tag stays visible. */
-export const NEW_TAG_MS = 60_000;
-/** A symbol cannot re-ping on the same board within this window. */
-const SYMBOL_COOLDOWN_MS = 180_000;
-/** Minimum spacing between audible chimes (bursts collapse into one). */
-const CHIME_GAP_MS = 1_500;
-/** After (re)seeding, rankings settle silently for this long. */
-const SETTLE_MS = 4_000;
+/** How long the NEW badge stays on a row. */
+export const NEW_BADGE_MS = 15_000;
+/** Chime coalescing window: entries inside it share one chime. */
+export const CHIME_COOLDOWN_MS = 1_500;
 
 interface Options {
+  /** Gainers ranked 1..N (symbols), for the active timeframe and volume filter. */
   gainers: readonly string[];
+  /** Losers ranked 1..N (symbols). */
   losers: readonly string[];
   timeframe: Timeframe;
-  /** Anything that changes the ranked universe (liquidity filter) - reseeds silently. */
-  scopeKey: string;
-  /** Live data is flowing (socket CONNECTED + hydrated). */
+  /** 24h volume filter value. Changing it resets the boards silently, like a timeframe change. */
+  minVolume: string;
+  /** Live socket is CONNECTED. Rankings keep updating silently while it is not. */
   live: boolean;
   pingEnabled: boolean;
 }
 
-export interface AlertState {
-  /** symbol -> NEW-tag expiry epoch ms, per board. */
+export interface LeaderboardAlerts {
+  /** symbol -> NEW badge expiry (epoch ms). */
   gainersNew: ReadonlyMap<string, number>;
   losersNew: ReadonlyMap<string, number>;
 }
 
+const EMPTY: LeaderboardAlerts = { gainersNew: new Map(), losersNew: new Map() };
+
 /**
- * Top 10 entry alerts with Top 15 hysteresis.
+ * Top 10 entry alerts with Top 15 hysteresis (see lib/alerts.ts).
  *
- * Suppression rules:
- *  - Registries seed silently on first live data, on timeframe switch, and on
- *    liquidity-filter change, then stay quiet for a short settle window.
- *  - While the socket is not CONNECTED registries keep tracking silently so a
- *    reconnect never produces a burst of stale "entries".
- *  - A contract re-arms only after it leaves the Top 15 (see Top15Tracker), and
- *    each board enforces a per-symbol cooldown.
- *  - Chimes are rate-limited globally; simultaneous entries play once.
- *  - Search text and row-count do NOT affect ranking, so they never trigger.
+ * - Silent seeding: on first hydration and whenever the timeframe or 24h
+ *   volume filter changes, both registries are reset to the current Ranks 1–15
+ *   with no sound.
+ * - Live evaluation: a symbol in Ranks 1–10 that is not in its board's
+ *   registry gets a 15s NEW badge and a chime. Chimes are coalesced: one plays
+ *   right away, and entries during the next 1.5s share one trailing chime.
+ * - Hysteresis eviction: symbols leave a registry only after their rank goes
+ *   above 15 or they are filtered out.
  */
-export function useLeaderboardAlerts(o: Options): AlertState {
-  const gT = useRef(new Top15Tracker());
-  const lT = useRef(new Top15Tracker());
-  const scope = useRef("");
-  const seededAt = useRef(0);
-  const lastChime = useRef(0);
-  const cooldown = useRef(new Map<string, number>());
-  const [state, setState] = useState<AlertState>({ gainersNew: new Map(), losersNew: new Map() });
+export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
+  const gainersKnownTop15 = useRef(new Set<string>());
+  const losersKnownTop15 = useRef(new Set<string>());
+  const contextKey = useRef<string | null>(null);
+  const lastChimeAt = useRef(0);
+  const pendingChime = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pingEnabled = useRef(o.pingEnabled);
+  const [state, setState] = useState<LeaderboardAlerts>(EMPTY);
+
+  pingEnabled.current = o.pingEnabled;
+
+  useEffect(
+    () => () => {
+      if (pendingChime.current) clearTimeout(pendingChime.current);
+    },
+    [],
+  );
 
   useEffect(() => {
+    if (o.gainers.length === 0 && o.losers.length === 0) return; // not hydrated yet
+
+    const key = `${o.timeframe}|${o.minVolume}`;
+    if (contextKey.current !== key) {
+      contextKey.current = key;
+      seedKnownTop15(gainersKnownTop15.current, o.gainers);
+      seedKnownTop15(losersKnownTop15.current, o.losers);
+      setState(EMPTY);
+      return;
+    }
+
+    const g = evaluateTop10Entries(gainersKnownTop15.current, o.gainers);
+    const l = evaluateTop10Entries(losersKnownTop15.current, o.losers);
+    if (!o.live || (g.length === 0 && l.length === 0)) return;
+
     const now = Date.now();
-    const key = `${o.timeframe}|${o.scopeKey}`;
-    if (key !== scope.current) {
-      scope.current = key;
-      gT.current.reset();
-      lT.current.reset();
-      seededAt.current = now;
-      setState((s) => (s.gainersNew.size || s.losersNew.size ? { gainersNew: new Map(), losersNew: new Map() } : s));
-    }
-    if (!o.gainers.length && !o.losers.length) return;
+    setState((s) => ({
+      gainersNew: withBadges(s.gainersNew, g, now),
+      losersNew: withBadges(s.losersNew, l, now),
+    }));
 
-    const gEntered = gT.current.update(o.gainers);
-    const lEntered = lT.current.update(o.losers);
-    if (!o.live || now - seededAt.current < SETTLE_MS) return;
-
-    const accept = (board: "g" | "l", syms: string[]) =>
-      syms.filter((s) => {
-        const k = `${board}:${o.timeframe}:${s}`;
-        if ((cooldown.current.get(k) ?? 0) > now) return false;
-        cooldown.current.set(k, now + SYMBOL_COOLDOWN_MS);
-        return true;
-      });
-    const g = accept("g", gEntered);
-    const l = accept("l", lEntered);
-    if (!g.length && !l.length) return;
-
-    setState((s) => {
-      const prune = (m: ReadonlyMap<string, number>, add: string[]) => {
-        const next = new Map<string, number>();
-        for (const [k, v] of m) if (v > now) next.set(k, v);
-        for (const sym of add) next.set(sym, now + NEW_TAG_MS);
-        return next;
-      };
-      return { gainersNew: prune(s.gainersNew, g), losersNew: prune(s.losersNew, l) };
-    });
-
-    if (o.pingEnabled && now - lastChime.current >= CHIME_GAP_MS) {
-      lastChime.current = now;
+    if (!pingEnabled.current) return;
+    const since = now - lastChimeAt.current;
+    if (since >= CHIME_COOLDOWN_MS) {
+      lastChimeAt.current = now;
       playChime();
+    } else if (!pendingChime.current) {
+      pendingChime.current = setTimeout(() => {
+        pendingChime.current = null;
+        lastChimeAt.current = Date.now();
+        if (pingEnabled.current) playChime();
+      }, CHIME_COOLDOWN_MS - since);
     }
-  }, [o.gainers, o.losers, o.timeframe, o.scopeKey, o.live, o.pingEnabled]);
+  }, [o.gainers, o.losers, o.timeframe, o.minVolume, o.live]);
 
   return state;
+}
+
+function withBadges(prev: ReadonlyMap<string, number>, add: readonly string[], now: number) {
+  const next = new Map<string, number>();
+  for (const [sym, exp] of prev) if (exp > now) next.set(sym, exp);
+  for (const sym of add) next.set(sym, now + NEW_BADGE_MS);
+  return next;
 }
