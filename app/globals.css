@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---- Design tokens (light) ---- */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --border: #e2e5ea;
+  --text: #0f1419;
+  --muted: #5d6673;
+  --subtle: #8a93a0;
+  --accent: #2f6fed;
+  --accent-fg: #ffffff;
+  --up: #0c8a4d;
+  --down: #c93030;
+  --up-soft: rgb(15 157 88 / 0.12);
+  --down-soft: rgb(217 58 58 / 0.12);
+  --flash-up: rgb(15 157 88 / 0.18);
+  --flash-down: rgb(217 58 58 / 0.18);
+  --warn: #a5650c;
+  --ring: rgb(47 111 237 / 0.55);
+  color-scheme: light;
+}
+
+/* ---- Design tokens (dark, default) ---- */
+.dark {
+  --bg: #0b0e12;
+  --surface: #12161c;
+  --surface-2: #181d25;
+  --border: #232a34;
+  --text: #e6e9ee;
+  --muted: #95a0ae;
+  --subtle: #6f7987;
+  --accent: #4c8dff;
+  --accent-fg: #0b0e12;
+  --up: #2ebd85;
+  --down: #f0525a;
+  --up-soft: rgb(46 189 133 / 0.14);
+  --down-soft: rgb(240 82 90 / 0.14);
+  --flash-up: rgb(46 189 133 / 0.22);
+  --flash-down: rgb(240 82 90 / 0.22);
+  --warn: #e0a83a;
+  --ring: rgb(76 141 255 / 0.6);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-up-soft: var(--up-soft);
+  --color-down-soft: var(--down-soft);
+  --color-warn: var(--warn);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* Live tick flash: the overlay span is re-keyed on every price change. */
+@keyframes flash-up {
+  from { background-color: var(--flash-up); }
+  to { background-color: transparent; }
+}
+@keyframes flash-down {
+  from { background-color: var(--flash-down); }
+  to { background-color: transparent; }
+}
+.flash-up { animation: flash-up 700ms ease-out both; }
+.flash-down { animation: flash-down 700ms ease-out both; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .flash-up, .flash-down, .pulse-dot { animation: none; }
+}
