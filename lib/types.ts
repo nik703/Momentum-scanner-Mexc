@@ -57,3 +57,74 @@ export interface ScannerRow {
 }
 
 export type WsStatus = "CONNECTING" | "CONNECTED" | "RECONNECTING";
+
+/* ------------------------------------------------------------------ */
+/* Contract Inspection Drawer                                          */
+/* ------------------------------------------------------------------ */
+
+/** One Min1 candle as returned by GET /api/contract/[symbol]. */
+export interface ContractKline {
+  /** Candle open time, epoch ms. */
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  /** Volume in contracts. */
+  vol: number;
+  /** Turnover in USDT. */
+  amount: number;
+}
+
+export interface ContractTicker {
+  lastPrice: number;
+  fairPrice: number;
+  indexPrice: number;
+  /** Funding rate as a fraction (0.0001 = 0.01%). */
+  fundingRate: number;
+  amount24: number;
+  volume24: number;
+  /** 24h change as a fraction. */
+  riseFallRate: number;
+  high24Price: number;
+  lower24Price: number;
+  holdVol: number;
+  timestamp: number;
+}
+
+export interface ContractDetail {
+  symbol: string;
+  baseCoin: string;
+  /** Base units per contract (e.g. 0.0001 BTC). Null if the detail endpoint failed. */
+  contractSize: number | null;
+  priceScale: number | null;
+  ticker: ContractTicker;
+  /** Up to 60 Min1 candles, oldest first; the last one is still forming. */
+  klines: ContractKline[];
+  generatedAt: number;
+}
+
+export interface ApiError {
+  error: string;
+  detail?: string;
+}
+
+/** Item in GET /api/symbols (every active *_USDT perpetual). */
+export interface UniverseItem {
+  symbol: string;
+  lastPrice: number;
+  amount24: number;
+  /** 24h change as a fraction. */
+  riseFallRate: number;
+}
+
+/** Internal chart candle (epoch-ms open time; v = contracts, a = USDT turnover). */
+export interface Candle {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+  a: number;
+}

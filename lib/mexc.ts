@@ -1,4 +1,11 @@
-import type { BootstrapPayload, BootstrapSymbol } from "./types.ts";
+import type {
+  BootstrapPayload,
+  BootstrapSymbol,
+  ContractDetail,
+  ContractKline,
+  ContractTicker,
+  UniverseItem,
+} from "./types.ts";
 
 const BASE = "https://contract.mexc.com/api/v1/contract";
 const TOP_N = 150;
@@ -20,15 +27,51 @@ interface RawKline {
   amount: number[];
 }
 
+/** MEXC error code returned for unknown / delisted contracts. */
+export const MEXC_CONTRACT_NOT_FOUND = 1001;
+
+export class MexcError extends Error {
+  constructor(
+    message: string,
+    /** MEXC business error code (e.g. 1001), or null for transport/HTTP failures. */
+    readonly code: number | null,
+    readonly httpStatus: number | null = null,
+  ) {
+    super(message);
+    this.name = "MexcError";
+  }
+  get notFound(): boolean {
+    return this.code === MEXC_CONTRACT_NOT_FOUND;
+  }
+}
+
+interface MexcEnvelope<T> {
+  success: boolean;
+  code?: number;
+  message?: string;
+  data: T;
+}
+
 async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, {
-    cache: "no-store",
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-    headers: { accept: "application/json" },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  const body = (await res.json()) as { success: boolean; data: T; code?: number };
-  if (!body.success) throw new Error(`MEXC error code ${body.code} for ${url}`);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      headers: { accept: "application/json" },
+    });
+  } catch (e) {
+    const timedOut = e instanceof DOMException && e.name === "TimeoutError";
+    throw new MexcError(timedOut ? "MEXC request timed out" : "MEXC unreachable", null);
+  }
+  if (!res.ok) throw new MexcError(`MEXC HTTP ${res.status}`, null, res.status);
+  let body: MexcEnvelope<T>;
+  try {
+    body = (await res.json()) as MexcEnvelope<T>;
+  } catch {
+    throw new MexcError("MEXC returned invalid JSON", null, res.status);
+  }
+  if (!body.success) throw new MexcError(body.message ?? `MEXC error ${body.code}`, body.code ?? null);
   return body.data;
 }
 
@@ -100,4 +143,131 @@ export async function buildBootstrap(): Promise<BootstrapPayload> {
   });
 
   return { generatedAt: Date.now(), interval: "Min5", symbols, failed };
+}
+
+/* ------------------------------------------------------------------ */
+/* Contract Inspection Drawer                                          */
+/* ------------------------------------------------------------------ */
+
+interface RawKlineFull extends RawKline {
+  high: number[];
+  low: number[];
+  vol: number[];
+}
+
+interface RawTickerFull extends RawTicker {
+  fairPrice: number;
+  indexPrice: number;
+  fundingRate: number;
+  riseFallRate: number;
+  high24Price: number;
+  lower24Price: number;
+  holdVol: number;
+  timestamp: number;
+}
+
+interface RawContractInfo {
+  baseCoin: string;
+  contractSize: number;
+  priceScale: number;
+}
+
+const num = (v: unknown, fallback = 0): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+
+/**
+ * Ticker + 60×Min1 klines (+ contract detail for contract size), fetched in parallel.
+ * Throws MexcError; `.notFound` is true when the contract does not exist.
+ */
+/** getJson with one short retry for transient failures. A definitive "not found" is never retried. */
+async function getJsonRetry<T>(url: string): Promise<T> {
+  try {
+    return await getJson<T>(url);
+  } catch (e) {
+    if (e instanceof MexcError && e.notFound) throw e;
+    await new Promise((r) => setTimeout(r, 300));
+    return getJson<T>(url);
+  }
+}
+
+export async function fetchContractDetail(symbol: string): Promise<ContractDetail> {
+  const q = encodeURIComponent(symbol);
+  const [klineR, tickerR, infoR] = await Promise.allSettled([
+    getJsonRetry<RawKlineFull>(`${BASE}/kline/${q}?interval=Min1&limit=60`),
+    getJsonRetry<RawTickerFull>(`${BASE}/ticker?symbol=${q}`),
+    getJsonRetry<RawContractInfo>(`${BASE}/detail?symbol=${q}`),
+  ]);
+
+  // A 1001 from any leg means the contract does not exist.
+  for (const r of [tickerR, klineR, infoR]) {
+    if (r.status === "rejected" && r.reason instanceof MexcError && r.reason.notFound) throw r.reason;
+  }
+  if (tickerR.status === "rejected") throw tickerR.reason;
+  if (klineR.status === "rejected") throw klineR.reason;
+
+  const t = tickerR.value;
+  // MEXC answers an unknown ?symbol= with the full ticker array on some edges. Treat that as not found.
+  if (!t || Array.isArray(t) || t.symbol !== symbol) {
+    throw new MexcError("Contract does not exist", MEXC_CONTRACT_NOT_FOUND);
+  }
+  const ticker: ContractTicker = {
+    lastPrice: num(t.lastPrice),
+    fairPrice: num(t.fairPrice, num(t.lastPrice)),
+    indexPrice: num(t.indexPrice, num(t.lastPrice)),
+    fundingRate: num(t.fundingRate),
+    amount24: num(t.amount24),
+    volume24: num(t.volume24),
+    riseFallRate: num(t.riseFallRate),
+    high24Price: num(t.high24Price),
+    lower24Price: num(t.lower24Price),
+    holdVol: num(t.holdVol),
+    timestamp: num(t.timestamp, Date.now()),
+  };
+
+  const k = klineR.value;
+  const len = Math.min(
+    k.time?.length ?? 0,
+    k.open?.length ?? 0,
+    k.high?.length ?? 0,
+    k.low?.length ?? 0,
+    k.close?.length ?? 0,
+    k.vol?.length ?? 0,
+    k.amount?.length ?? 0,
+  );
+  const klines: ContractKline[] = [];
+  for (let i = Math.max(0, len - 60); i < len; i++) {
+    klines.push({
+      timestamp: k.time[i] * 1000,
+      open: k.open[i],
+      high: k.high[i],
+      low: k.low[i],
+      close: k.close[i],
+      vol: k.vol[i],
+      amount: k.amount[i],
+    });
+  }
+
+  const info = infoR.status === "fulfilled" ? infoR.value : null;
+  return {
+    symbol,
+    baseCoin: info?.baseCoin ?? symbol.replace(/_USDT$/, ""),
+    contractSize: info && info.contractSize > 0 ? info.contractSize : null,
+    priceScale: info && Number.isInteger(info.priceScale) ? info.priceScale : null,
+    ticker,
+    klines,
+    generatedAt: Date.now(),
+  };
+}
+
+/** Every active *_USDT perpetual, most liquid first (for the global lookup). */
+export async function fetchUniverse(): Promise<UniverseItem[]> {
+  const tickers = await getJson<RawTickerFull[]>(`${BASE}/ticker`);
+  return tickers
+    .filter((t) => typeof t.symbol === "string" && t.symbol.endsWith("_USDT") && t.lastPrice > 0)
+    .sort((a, b) => b.amount24 - a.amount24)
+    .map((t) => ({
+      symbol: t.symbol,
+      lastPrice: num(t.lastPrice),
+      amount24: num(t.amount24),
+      riseFallRate: num(t.riseFallRate),
+    }));
 }

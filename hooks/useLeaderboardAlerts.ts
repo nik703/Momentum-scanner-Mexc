@@ -52,7 +52,9 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
   const pingEnabled = useRef(o.pingEnabled);
   const [state, setState] = useState<LeaderboardAlerts>(EMPTY);
 
-  pingEnabled.current = o.pingEnabled;
+  useEffect(() => {
+    pingEnabled.current = o.pingEnabled;
+  }, [o.pingEnabled]);
 
   useEffect(
     () => () => {

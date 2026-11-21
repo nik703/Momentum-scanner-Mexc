@@ -1,7 +1,8 @@
 "use client";
 
 import { TIMEFRAMES, type Timeframe } from "@/lib/types";
-import { Kbd, SegmentedControl, Switch, Tooltip, cx } from "./ui/primitives";
+import { ContractLookup } from "./ContractLookup";
+import { Kbd, SegmentedControl, Switch, Tooltip } from "./ui/primitives";
 
 export const MIN_VOLUMES = ["0", "1000000", "5000000", "25000000"] as const;
 export type MinVolume = (typeof MIN_VOLUMES)[number];
@@ -36,43 +37,12 @@ interface Props {
   pingOn: boolean;
   onPing: (on: boolean) => void;
   onTestPing: () => void;
+  onOpenContract: (symbol: string) => void;
 }
 
-function SearchBox({ query, onQuery, className }: { query: string; onQuery: (q: string) => void; className?: string }) {
-  return (
-    <label className={cx("relative flex h-7 items-center", className)}>
-      <span className="sr-only">Search symbol</span>
-      <svg
-        viewBox="0 0 16 16"
-        width="12"
-        height="12"
-        aria-hidden
-        className="pointer-events-none absolute left-2 text-fg-3"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      >
-        <circle cx="7" cy="7" r="4.5" />
-        <path d="M10.5 10.5L14 14" />
-      </svg>
-      <input
-        data-symbol-search
-        type="search"
-        value={query}
-        onChange={(e) => onQuery(e.target.value)}
-        placeholder="Symbol"
-        autoComplete="off"
-        spellCheck={false}
-        className="num h-full w-full rounded-[3px] border border-line bg-canvas pl-6 pr-6 text-[12px] uppercase text-fg placeholder:normal-case placeholder:text-fg-3 focus:border-line-strong focus:outline-none"
-      />
-      <span className="pointer-events-none absolute right-1.5 hidden sm:block">
-        <Kbd>/</Kbd>
-      </span>
-    </label>
-  );
-}
-
-function Filters(p: Pick<Props, "minVolume" | "onMinVolume" | "limit" | "onLimit" | "query" | "onQuery">) {
+function Filters(
+  p: Pick<Props, "minVolume" | "onMinVolume" | "limit" | "onLimit" | "query" | "onQuery" | "onOpenContract">,
+) {
   return (
     <>
       <div className="flex items-center gap-1.5">
@@ -80,7 +50,12 @@ function Filters(p: Pick<Props, "minVolume" | "onMinVolume" | "limit" | "onLimit
         <SegmentedControl label="Minimum 24h volume" value={p.minVolume} onChange={p.onMinVolume} options={MIN_VOL_OPTS} mono />
       </div>
       <SegmentedControl label="Row count" value={p.limit} onChange={p.onLimit} options={LIMIT_OPTS} />
-      <SearchBox query={p.query} onQuery={p.onQuery} className="min-w-[8rem] flex-1 lg:w-44 lg:flex-none" />
+      <ContractLookup
+        query={p.query}
+        onQuery={p.onQuery}
+        onOpenContract={p.onOpenContract}
+        className="min-w-[8rem] flex-1 lg:w-52 lg:flex-none"
+      />
     </>
   );
 }
@@ -88,7 +63,7 @@ function Filters(p: Pick<Props, "minVolume" | "onMinVolume" | "limit" | "onLimit
 export function TerminalHeader(p: Props) {
   return (
     <>
-      <header className="sticky top-0 z-20 flex h-[44px] items-center gap-2 border-b border-line bg-panel px-2 sm:gap-3 sm:px-3">
+      <header className="sticky top-0 z-20 flex h-[44px] sm:z-50 items-center gap-2 border-b border-line bg-panel px-2 sm:gap-3 sm:px-3">
         <div className="flex shrink-0 items-center gap-2">
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden className="text-gain">
             <path d="M2 11.5l3.5-3.5 2.5 2.5L14 4.5" fill="none" stroke="currentColor" strokeWidth="1.6" />

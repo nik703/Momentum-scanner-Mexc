@@ -6,6 +6,7 @@ import { useLeaderboardAlerts } from "@/hooks/useLeaderboardAlerts";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import { playChime, unlockAudio } from "@/lib/audio";
 import { TIMEFRAMES, type Timeframe } from "@/lib/types";
+import { ContractDrawer } from "./ContractDrawer";
 import { LeaderboardTable, type BoardRow } from "./LeaderboardTable";
 import { StatusBar } from "./StatusBar";
 import {
@@ -46,6 +47,8 @@ export function Scanner() {
   const [theme, setTheme] = usePersistentState<Theme>("mx-theme", "dark", THEMES);
   const [ping, setPing] = usePersistentState<PingState>("mx-ping", "off", PING_STATES);
   const [query, setQuery] = useState("");
+  const [inspect, setInspect] = useState<string | null>(null);
+  const closeDrawer = useCallback(() => setInspect(null), []);
   const [audioReady, setAudioReady] = useState(false);
 
   // The head script already set data-theme before first paint, so skip the first run.
@@ -90,10 +93,15 @@ export function Scanner() {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const el = e.target instanceof HTMLElement ? e.target : null;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
-        if (e.key === "Escape" && el.hasAttribute("data-symbol-search")) {
+        // The lookup calls preventDefault when its own Esc closed the result list.
+        if (e.key === "Escape" && !e.defaultPrevented && el.hasAttribute("data-symbol-search")) {
           setQuery("");
           el.blur();
         }
+        return;
+      }
+      if (e.key === "Escape") {
+        setInspect(null);
         return;
       }
       if (e.key === "1" || e.key === "2" || e.key === "3") setTf(TIMEFRAMES[Number(e.key) - 1]);
@@ -180,6 +188,7 @@ export function Scanner() {
         pingOn={ping === "on"}
         onPing={onPing}
         onTestPing={onTestPing}
+        onOpenContract={setInspect}
       />
 
       {snap.error && loading && (
@@ -199,6 +208,8 @@ export function Scanner() {
           now={snap.flushedAt}
           totalRanked={ranked.gainers.length}
           loading={loading}
+          selectedSymbol={inspect}
+          onSelect={setInspect}
         />
         <LeaderboardTable
           title="Top Losers"
@@ -209,6 +220,8 @@ export function Scanner() {
           now={snap.flushedAt}
           totalRanked={ranked.losers.length}
           loading={loading}
+          selectedSymbol={inspect}
+          onSelect={setInspect}
         />
       </main>
 
@@ -219,6 +232,9 @@ export function Scanner() {
         syncedAt={snap.bootstrapAt}
         audioLocked={ping === "on" && !audioReady}
       />
+
+      {/* Keyed by symbol: switching contracts tears down one feed (sending unsubs) and starts the next. */}
+      {inspect && <ContractDrawer key={inspect} symbol={inspect} onClose={closeDrawer} />}
     </div>
   );
 }

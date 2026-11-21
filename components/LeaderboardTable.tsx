@@ -52,10 +52,12 @@ interface RowProps {
   isNew: boolean;
   /** 0..1 share of the largest |move| shown on this board, sets the magnitude bar width. */
   magnitude: number;
+  selected: boolean;
+  onSelect: (symbol: string) => void;
 }
 
 const Row = memo(
-  function Row({ row, side, isNew, magnitude }: RowProps) {
+  function Row({ row, side, isNew, magnitude, selected, onSelect }: RowProps) {
     const [copied, setCopied] = useState(false);
     const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
     useEffect(() => () => {
@@ -78,7 +80,24 @@ const Row = memo(
     const base = row.symbol.replace(/_USDT$/, "");
 
     return (
-      <div role="row" className={cx(GRID, "group relative h-9 border-b border-line last:border-b-0 hover:bg-row-hover")}>
+      <div
+        role="row"
+        tabIndex={0}
+        aria-selected={selected}
+        data-row-symbol={row.symbol}
+        onClick={() => onSelect(row.symbol)}
+        onKeyDown={(e) => {
+          if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+            e.preventDefault();
+            onSelect(row.symbol);
+          }
+        }}
+        className={cx(
+          GRID,
+          "group relative h-9 cursor-pointer border-b border-line last:border-b-0 hover:bg-row-hover focus-visible:bg-row-hover focus-visible:outline-none",
+          selected && "bg-row-hover shadow-[inset_2px_0_0_var(--fg-2)]",
+        )}
+      >
         {row.tickSeq > 0 && (
           <span
             key={row.tickSeq}
@@ -97,6 +116,7 @@ const Row = memo(
             target="_blank"
             rel="noopener noreferrer"
             title={`Open ${row.symbol} on MEXC Futures`}
+            onClick={(e) => e.stopPropagation()}
             className="group/link inline-flex min-w-0 items-center gap-1 font-medium text-fg hover:underline hover:decoration-fg-3 hover:underline-offset-2"
           >
             <span className="truncate">
@@ -114,7 +134,10 @@ const Row = memo(
           )}
           <button
             type="button"
-            onClick={copy}
+            onClick={(e) => {
+              e.stopPropagation();
+              void copy();
+            }}
             aria-label={copied ? `Copied ${row.symbol}` : `Copy ${row.symbol}`}
             title={copied ? "Copied" : "Copy symbol"}
             className={cx(
@@ -154,6 +177,8 @@ const Row = memo(
   },
   (a, b) =>
     a.isNew === b.isNew &&
+    a.selected === b.selected &&
+    a.onSelect === b.onSelect &&
     a.side === b.side &&
     a.magnitude === b.magnitude &&
     a.row.rank === b.row.rank &&
@@ -184,6 +209,8 @@ export function LeaderboardTable({
   now,
   totalRanked,
   loading,
+  selectedSymbol,
+  onSelect,
 }: {
   title: string;
   side: "gain" | "loss";
@@ -193,6 +220,8 @@ export function LeaderboardTable({
   now: number;
   totalRanked: number;
   loading: boolean;
+  selectedSymbol: string | null;
+  onSelect: (symbol: string) => void;
 }) {
   const headId = `${side}-board-title`;
   let maxAbs = 0;
@@ -250,6 +279,8 @@ export function LeaderboardTable({
                   side={side}
                   isNew={exp !== undefined && exp > now}
                   magnitude={maxAbs > 0 ? Math.round((Math.abs(r.move) / maxAbs) * 50) / 50 : 0}
+                  selected={r.symbol === selectedSymbol}
+                  onSelect={onSelect}
                 />
               </Fragment>
             );
