@@ -13,19 +13,18 @@ import {
 } from "./liquidations.ts";
 import { ReconnectingSocket, type SocketStatus } from "./reconnectingSocket.ts";
 
-const BINANCE_WS = "wss://fstream.binance.com/ws/!forceOrder@arr";
+const BINANCE_STREAM_BASE = "wss://fstream.binance.com/stream?streams=";
 const BYBIT_WS = "wss://stream.bybit.com/v5/public/linear";
 // OKX serves the same public API on :443 and :8443. :443 goes first because corporate and
 // mobile firewalls often block :8443. Reconnects rotate to the documented :8443 endpoint.
 const OKX_WS = ["wss://ws.okx.com/ws/v5/public", "wss://ws.okx.com:8443/ws/v5/public"] as const;
-const OKX_INSTRUMENTS = "https://www.okx.com/api/v5/public/instruments?instType=SWAP";
+const OKX_INSTRUMENT = "https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=";
 
 const TAPE_MAX = 200;
 /**
- * Binance answers restricted regions (e.g. the US) with HTTP 451 on REST, but its WebSocket
- * still opens and then sends nothing. The all-market !forceOrder@arr stream normally delivers
- * frames within a minute or two, so a long silence while "open" is reported as a problem
- * instead of a misleading green dot.
+ * Binance answers restricted regions (e.g. the US) with HTTP 451 on REST, while its WebSocket
+ * still opens and then sends nothing. A per-symbol stream can also be quiet for a long time
+ * legitimately, so a long silence only adds an explanatory note. It is not shown as an error.
  */
 const BN_SILENCE_MS = 120_000;
 const FLUSH_MS = 250;
@@ -45,93 +44,63 @@ export interface LiquidationSnapshot {
 }
 
 /* ------------------------------------------------------------------ */
-/* Shared Binance all-market stream (ref-counted)                      */
-/* !forceOrder@arr carries every symbol, so one connection serves any base asset. */
-/* Switching contracts reuses it. It closes BINANCE_GRACE_MS after the last feed  */
-/* releases it (i.e. when the drawer closes).                                     */
+/* Per-coin subscriptions (no market-wide streams)                     */
 /* ------------------------------------------------------------------ */
-const BINANCE_GRACE_MS = 1_500;
 
-interface BinanceListener {
-  onMessage: (d: string) => void;
-  onStatus: (s: SocketStatus) => void;
+/**
+ * Binance USDⓈ-M per-symbol liquidation streams for one base asset, as one combined socket:
+ * {base}USDT, {base}USDC and the 1000/1000000 size-prefixed listings Binance uses for cheap coins
+ * (e.g. 1000PEPEUSDT). Unknown streams are simply silent.
+ */
+export function binanceStreams(base: string): string[] {
+  const b = base.toLowerCase();
+  return [`${b}usdt`, `${b}usdc`, `1000${b}usdt`, `1000000${b}usdt`].map((s) => `${s}@forceOrder`);
 }
 
-const binance = {
-  socket: null as ReconnectingSocket | null,
-  listeners: new Set<BinanceListener>(),
-  status: "connecting" as SocketStatus,
-  openedAt: null as number | null,
-  frames: 0,
-  closeTimer: null as ReturnType<typeof setTimeout> | null,
-};
-
-function acquireBinance(l: BinanceListener): () => void {
-  if (binance.closeTimer) {
-    clearTimeout(binance.closeTimer);
-    binance.closeTimer = null;
-  }
-  binance.listeners.add(l);
-  if (!binance.socket) {
-    binance.frames = 0;
-    binance.status = "connecting";
-    binance.socket = new ReconnectingSocket({
-      urls: [BINANCE_WS],
-      staleMs: 30 * 60_000, // the stream can be silent for long stretches; Binance pings at the protocol level
-      onOpen: () => {},
-      onMessage: (d) => {
-        binance.frames++;
-        for (const x of binance.listeners) x.onMessage(d);
-      },
-      onStatus: (st) => {
-        binance.status = st;
-        binance.openedAt = st === "open" ? Date.now() : null;
-        for (const x of binance.listeners) x.onStatus(st);
-      },
-    });
-  }
-  l.onStatus(binance.status);
-  return () => {
-    binance.listeners.delete(l);
-    if (binance.listeners.size > 0 || binance.closeTimer) return;
-    binance.closeTimer = setTimeout(() => {
-      binance.closeTimer = null;
-      if (binance.listeners.size > 0) return;
-      binance.socket?.close();
-      binance.socket = null;
-      binance.openedAt = null;
-    }, BINANCE_GRACE_MS);
-  };
+export function binanceUrl(base: string): string {
+  return BINANCE_STREAM_BASE + binanceStreams(base).join("/");
 }
 
-/* ------------------------------------------------------------------ */
-/* OKX ctVal cache: fetched once per browser session                  */
-/* ------------------------------------------------------------------ */
-let okxCtVals: Promise<OkxCtValMap> | null = null;
+/** Bybit: exactly one topic for the asset. */
+export function bybitTopic(base: string): string {
+  return `allLiquidation.${base}USDT`;
+}
 
-export function loadOkxCtVals(): Promise<OkxCtValMap> {
-  if (!okxCtVals) {
-    okxCtVals = fetch(OKX_INSTRUMENTS, { signal: AbortSignal.timeout(15_000) })
-      .then((r) => {
+/** OKX instIds for one asset: linear (USDT) and inverse (USD) perpetuals. */
+export function okxInstIds(base: string): string[] {
+  return [`${base}-USDT-SWAP`, `${base}-USD-SWAP`];
+}
+
+/* OKX ctVal: fetched per asset (only that coin's instruments), cached for the session. */
+const okxCtValCache = new Map<string, Promise<OkxCtValMap>>();
+
+/**
+ * ctVal for one asset's OKX swaps. Instruments that don't exist (code 51001) are skipped. A
+ * network failure rejects, and the next call retries. Resolves to an empty map when OKX doesn't
+ * list the coin.
+ */
+export function loadOkxCtVals(base: string): Promise<OkxCtValMap> {
+  let p = okxCtValCache.get(base);
+  if (!p) {
+    p = Promise.all(
+      okxInstIds(base).map(async (id) => {
+        const r = await fetch(OKX_INSTRUMENT + encodeURIComponent(id), { signal: AbortSignal.timeout(15_000) });
         if (!r.ok) throw new Error(`OKX instruments HTTP ${r.status}`);
-        return r.json() as Promise<unknown>;
-      })
-      .then((j) => {
-        const map = parseOkxInstruments(j);
-        if (map.size === 0) throw new Error("OKX instruments empty");
-        return map;
+        return parseOkxInstruments(await r.json());
+      }),
+    )
+      .then((maps) => {
+        const merged = new Map<string, OkxCtValMap extends ReadonlyMap<string, infer V> ? V : never>();
+        for (const m of maps) for (const [k, v] of m) merged.set(k, v);
+        return merged as OkxCtValMap;
       })
       .catch((e: unknown) => {
-        okxCtVals = null; // allow a later retry
+        okxCtValCache.delete(base); // allow a later retry
         throw e;
       });
+    okxCtValCache.set(base, p);
   }
-  return okxCtVals;
-}
-
-/** Bybit topics to try. MEXC may list PEPE while Bybit lists 1000PEPE. Unknown topics are rejected harmlessly. */
-export function bybitTopics(base: string): string[] {
-  return [base, `1000${base}`, `10000${base}`, `1000000${base}`].map((b) => `allLiquidation.${b}USDT`);
+  return p;
 }
 
 /**
@@ -149,7 +118,8 @@ export class LiquidationFeed {
   private session: LiqTotals = { longUsd: 0, shortUsd: 0, count: 0 };
   private status: Record<Exchange, SocketStatus> = { BN: "connecting", BYB: "connecting", OKX: "connecting" };
   private notes: Partial<Record<Exchange, string>> = {};
-  private releaseBinance: (() => void) | null = null;
+  private bnOpenedAt: number | null = null;
+  private bnFrames = 0;
   private timers: Array<ReturnType<typeof setInterval>> = [];
   private okxRetry: ReturnType<typeof setTimeout> | null = null;
   private dirty = false;
@@ -185,24 +155,32 @@ export class LiquidationFeed {
     this.running = true;
     const base = this.base;
 
-    this.releaseBinance = acquireBinance({
-      onMessage: (d) => {
-        if (this.notes.BN) {
-          this.notes = {};
-          this.setStatus("BN", "open");
-        }
-        this.add(parseBinanceForceOrder(d, base));
-      },
-      onStatus: (s) => this.setStatus("BN", s),
-    });
     this.sockets.push(
+      new ReconnectingSocket({
+        urls: [binanceUrl(base)],
+        staleMs: 30 * 60_000, // per-symbol streams can be quiet for long; Binance pings at the protocol level
+        onOpen: () => {},
+        onMessage: (d) => {
+          this.bnFrames++;
+          if (this.notes.BN) this.notes = {};
+          this.add(parseBinanceForceOrder(d, base));
+        },
+        onStatus: (s) => {
+          this.bnOpenedAt = s === "open" ? Date.now() : null;
+          this.setStatus("BN", s);
+        },
+      }),
       new ReconnectingSocket({
         urls: [BYBIT_WS],
         heartbeat: { ms: 20_000, payload: JSON.stringify({ op: "ping" }) },
-        onOpen: (send) => {
-          for (const topic of bybitTopics(base)) send(JSON.stringify({ op: "subscribe", args: [topic] }));
+        onOpen: (send) => send(JSON.stringify({ op: "subscribe", args: [bybitTopic(base)] })),
+        onMessage: (d) => {
+          if (d.includes('"op":"subscribe"') && d.includes('"success":false')) {
+            this.notes = { ...this.notes, BYB: `No Bybit perpetual ${base}USDT` };
+            this.dirty = true;
+          }
+          this.add(parseBybitLiquidation(d, base));
         },
-        onMessage: (d) => this.add(parseBybitLiquidation(d, base)),
         onStatus: (s) => this.setStatus("BYB", s),
       }),
     );
@@ -222,8 +200,6 @@ export class LiquidationFeed {
     this.running = false;
     for (const s of this.sockets) s.close();
     this.sockets = [];
-    this.releaseBinance?.();
-    this.releaseBinance = null;
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
     if (this.okxRetry) clearTimeout(this.okxRetry);
@@ -231,10 +207,16 @@ export class LiquidationFeed {
   }
 
   private connectOkx(attempt: number) {
-    loadOkxCtVals()
+    loadOkxCtVals(this.base)
       .then((ctVals) => {
         if (!this.running) return;
         const base = this.base;
+        if (ctVals.size === 0) {
+          // OKX doesn't list this asset: open no socket at all.
+          this.notes = { ...this.notes, OKX: `Not listed on OKX (${base}-USDT/USD-SWAP)` };
+          this.setStatus("OKX", "closed");
+          return;
+        }
         this.sockets.push(
           new ReconnectingSocket({
             urls: OKX_WS,
@@ -256,14 +238,15 @@ export class LiquidationFeed {
   }
 
   private checkBinanceSilence() {
-    if (binance.frames > 0 || binance.openedAt === null || this.notes.BN) return;
-    if (Date.now() - binance.openedAt < BN_SILENCE_MS) return;
-    this.notes = { ...this.notes, BN: "Connected but silent: Binance may block this region (HTTP 451)" };
-    this.setStatus("BN", "error");
+    if (this.bnFrames > 0 || this.bnOpenedAt === null || this.notes.BN) return;
+    if (Date.now() - this.bnOpenedAt < BN_SILENCE_MS) return;
+    this.notes = { ...this.notes, BN: "No Binance liquidations yet (quiet market, or region-restricted: HTTP 451)" };
+    this.dirty = true;
   }
 
   private setStatus(ex: Exchange, s: SocketStatus) {
     if (!this.running && s !== "closed") return;
+    if (this.status[ex] === s) return;
     this.status = { ...this.status, [ex]: s };
     this.dirty = true;
   }

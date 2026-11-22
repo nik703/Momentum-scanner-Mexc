@@ -15,11 +15,14 @@ export function ContractLookup({
   query,
   onQuery,
   onOpenContract,
+  focused,
   className,
 }: {
   query: string;
   onQuery: (q: string) => void;
   onOpenContract: (symbol: string) => void;
+  /** Drawer open: search only the in-memory list and never fetch /api/symbols. */
+  focused: boolean;
   className?: string;
 }) {
   const uni = useContractUniverse();
@@ -91,7 +94,7 @@ export function ContractLookup({
             setActive(0);
           }}
           onFocus={() => {
-            uni.ensure();
+            if (!focused) uni.ensure(); // keystrokes never fetch; only focus does, outside focus mode
             setOpen(true);
           }}
           onBlur={() => setOpen(false)}

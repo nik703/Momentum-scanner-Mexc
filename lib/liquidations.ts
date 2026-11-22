@@ -60,7 +60,9 @@ export function instrumentBase(code: string): string {
 /* ------------------------------------------------------------------ */
 export function parseBinanceForceOrder(raw: unknown, base: string): LiqEvent[] {
   const msg = parse(raw);
-  const frames = Array.isArray(msg) ? msg : [msg];
+  // Combined per-symbol streams wrap the event: {"stream":"btcusdt@forceOrder","data":{...}}
+  const unwrapped = isObj(msg) && typeof msg.stream === "string" && "data" in msg ? msg.data : msg;
+  const frames = Array.isArray(unwrapped) ? unwrapped : [unwrapped];
   const out: LiqEvent[] = [];
   for (const f of frames) {
     if (!isObj(f) || f.e !== "forceOrder" || !isObj(f.o)) continue;

@@ -43,8 +43,8 @@ Browser ──GET /api/scanner (CDN: s-maxage=12, swr=24)──► Vercel fn ─
 | `lib/mexc.ts` | MEXC fetch helpers, `mapLimit` concurrency helper, one retry per kline. |
 | `lib/calculator.ts` | Live turnover delta, Min5 rollover, timeframe metrics (pure, unit-tested). |
 | `lib/store.ts` | External store. Ticks change symbol state in place, and a 250ms flush rebuilds the rows. |
-| `lib/ws.ts` | WebSocket client: `sub.tickers`, `ping` every 15s, stale-socket detection, exponential-backoff reconnect with jitter. |
-| `hooks/useScanner.ts` | Bootstrap, then WebSocket, then a silent re-sync every 60s and when the tab becomes visible or the connection comes back. |
+| `lib/mexcSocket.ts` | The app's **only** MEXC WebSocket: one 15s `ping` heartbeat, one reconnect loop with backoff, and a registry of the channels the current mode needs. That registry is re-sent after every reconnect. |
+| `hooks/useScanner.ts` | Scanner data: bootstrap, then `sub.tickers`, then a silent re-sync every 60s and when the tab becomes visible or the connection returns. Pauses entirely in Single-Coin Focus Mode. |
 | `hooks/useLeaderboardAlerts.ts` + `lib/alerts.ts` | Top 10 entry alerts with Top 15 hysteresis. |
 | `lib/audio.ts` | Web Audio chime: 880Hz then 1320Hz sine, 180ms exponential envelope. |
 | `components/TerminalHeader.tsx` | Sticky 44px control bar: timeframe, volume filter, rows, search, theme, ping. |
@@ -64,6 +64,36 @@ Browser ──GET /api/scanner (CDN: s-maxage=12, swr=24)──► Vercel fn ─
 `Vol % = (current − baseline) / max(baseline, 1) × 100`
 
 When the 5-minute bucket rolls over, the live delta is added to the closing candle and the snapshot point moves to the current 24h figures. A new empty candle then opens. Values for every timeframe are computed on each flush, so switching timeframes only re-sorts data already in memory.
+
+## Single-Coin Focus Mode (drawer open)
+
+Opening a contract switches the app to that one coin. `useScanner` sets the mode on the shared socket with `mexcSocket.setFocus(symbol)`, and each change sends its unsubscribes before its subscribes.
+
+| Transition | Frames on the single MEXC socket |
+| --- | --- |
+| Open | `unsub.tickers` → `sub.ticker`, `sub.kline` (Min1), `sub.deal` (`compress:false, reduce:false`) for the symbol |
+| Switch coin | `unsub.ticker/kline/deal` for the previous coin → `sub.ticker/kline/deal` for the next |
+| Close | `unsub.ticker/kline/deal` → `sub.tickers` |
+
+While a coin is open:
+
+- **`/api/scanner` is never called.** The 60s interval is cleared, any sync already in flight is aborted, and the visibility, online and reconnect syncs are skipped.
+- **The leaderboards are frozen.** The store's 250ms flush stops, and the board inputs (rows, timeframe, filter, search, row count) are held, so nothing re-sorts or re-renders. The boards show a `Paused` badge and the status bar shows `FOCUS … · SCANNER PAUSED`.
+- **Only these requests and streams run:**
+  - one `GET /api/contract/{symbol}`;
+  - the coin's three MEXC channels;
+  - liquidation streams for that coin's base asset:
+    - Binance per-symbol `…@forceOrder` streams (one combined socket);
+    - Bybit `allLiquidation.{BASE}USDT`, exactly one topic;
+    - OKX metadata fetched only for `{BASE}-USDT-SWAP` and `{BASE}-USD-SWAP`, with no OKX socket if OKX doesn't list the coin.
+- **Search makes no requests.** The lookup list is fetched once while the scanner is showing, and searching inside the drawer filters it in memory.
+
+Closing the drawer resubscribes `sub.tickers`. If the last `/api/scanner` sync is more than 45s old, it runs one immediate sync, then restarts the 60s interval. For 3s after closing, and while that catch-up sync runs plus 1.5s after it lands, each new ranking frame silently re-seeds the known Top 15 sets, so closing never causes a burst of late Top 10 chimes.
+
+Limits set by the exchanges, not by this app:
+
+- **OKX.** The `liquidation-orders` channel only accepts `instType`; per-coin filters are ignored (checked live), so OKX events are filtered in the browser.
+- **Bybit.** Subscribing to exactly one topic means coins Bybit lists only with a `1000` prefix (e.g. `1000PEPEUSDT`) get no Bybit events.
 
 ## Alert rules
 

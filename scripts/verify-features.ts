@@ -30,6 +30,8 @@ import {
   TradeCandleBuilder,
 } from "../lib/candles.ts";
 import { normalizeDeals } from "../lib/mexc.ts";
+import { binanceStreams, binanceUrl, bybitTopic, okxInstIds } from "../lib/liquidationFeed.ts";
+import { diffChannels, focusChannels, tickersChannels } from "../lib/mexcSocket.ts";
 import {
   instrumentBase,
   okxNotionalUsd,
@@ -586,6 +588,61 @@ check("watermark font fits ~60% of plot width, clamped 28..68px", () => {
   assert.equal(fitWatermarkPx(720, 200, 200), 28); // floor for long sub-cent prices
   assert.equal(fitWatermarkPx(200, 600, 60), 33); // also capped by 55% of pane height
   assert.equal(fitWatermarkPx(0, 300, 200), 28);
+});
+
+/* ------------------------------------------------------------------ */
+console.log("\n[7] Single-coin focus: multiplexer + per-coin streams");
+
+const methods = (frames: string[]) => frames.map((f) => {
+  const j = JSON.parse(f) as { method: string; param: { symbol?: string; compress?: boolean; reduce?: boolean } };
+  return `${j.method}${j.param.symbol ? `:${j.param.symbol}` : ""}`;
+});
+
+check("open drawer: unsub.tickers is sent BEFORE sub.ticker/kline/deal", () => {
+  assert.deepEqual(methods(diffChannels(tickersChannels(), focusChannels("BTC_USDT"))), [
+    "unsub.tickers",
+    "sub.ticker:BTC_USDT",
+    "sub.kline:BTC_USDT",
+    "sub.deal:BTC_USDT",
+  ]);
+  const deal = JSON.parse(focusChannels("BTC_USDT")[2].sub) as { param: { compress: boolean; reduce: boolean } };
+  assert.deepEqual([deal.param.compress, deal.param.reduce], [false, false]);
+});
+
+check("switch coin: unsub prev x3 BEFORE sub next x3", () => {
+  assert.deepEqual(methods(diffChannels(focusChannels("BTC_USDT"), focusChannels("ETH_USDT"))), [
+    "unsub.ticker:BTC_USDT",
+    "unsub.kline:BTC_USDT",
+    "unsub.deal:BTC_USDT",
+    "sub.ticker:ETH_USDT",
+    "sub.kline:ETH_USDT",
+    "sub.deal:ETH_USDT",
+  ]);
+});
+
+check("close drawer: unsub symbol x3 then sub.tickers; same mode = no frames", () => {
+  assert.deepEqual(methods(diffChannels(focusChannels("ETH_USDT"), tickersChannels())), [
+    "unsub.ticker:ETH_USDT",
+    "unsub.kline:ETH_USDT",
+    "unsub.deal:ETH_USDT",
+    "sub.tickers",
+  ]);
+  assert.deepEqual(diffChannels(tickersChannels(), tickersChannels()), []);
+});
+
+check("liquidation streams are per-coin (no market-wide subscriptions)", () => {
+  assert.equal(bybitTopic("SOL"), "allLiquidation.SOLUSDT");
+  assert.deepEqual(okxInstIds("SOL"), ["SOL-USDT-SWAP", "SOL-USD-SWAP"]);
+  assert.ok(binanceStreams("PEPE").includes("1000pepeusdt@forceOrder"));
+  assert.ok(!binanceUrl("SOL").includes("!forceOrder@arr"));
+  assert.ok(binanceUrl("SOL").startsWith("wss://fstream.binance.com/stream?streams=solusdt@forceOrder/"));
+});
+
+check("Binance combined-stream frames are unwrapped", () => {
+  const wrapped = { stream: "solusdt@forceOrder", data: { e: "forceOrder", E: 1, o: { s: "SOLUSDT", S: "SELL", q: "2", p: "70", ap: "70", T: 5 } } };
+  const [e] = parseBinanceForceOrder(JSON.stringify(wrapped), "SOL");
+  assert.equal(e.side, "LONG");
+  assert.equal(e.usd, 140);
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

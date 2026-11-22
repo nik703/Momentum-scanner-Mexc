@@ -10,10 +10,10 @@ import {
   TradeCandleBuilder,
   type Trade,
 } from "./candles.ts";
-import { ReconnectingSocket, type SocketStatus } from "./reconnectingSocket.ts";
+import { mexcSocket, type MexcMessage } from "./mexcSocket.ts";
+import type { SocketStatus } from "./reconnectingSocket.ts";
 import type { ApiError, Candle, ContractDetail, ContractTicker } from "./types.ts";
 
-const MEXC_WS = "wss://contract.mexc.com/edge";
 const FLUSH_MS = 250;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_FETCH_RETRIES = 3;
@@ -44,20 +44,13 @@ export interface ContractSnapshot {
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** Subscription frames for one symbol: `sub.*` on start/reconnect, `unsub.*` on stop. */
-export function subscriptionFrames(symbol: string, op: "sub" | "unsub"): string[] {
-  return [
-    JSON.stringify({ method: `${op}.kline`, param: { symbol, interval: "Min1" } }),
-    JSON.stringify({ method: `${op}.deal`, param: { symbol, compress: false, reduce: false } }),
-    JSON.stringify({ method: `${op}.ticker`, param: { symbol } }),
-  ];
-}
-
 /**
  * Live data for one contract in the Inspection Drawer:
  *  - REST hydrate from /api/contract/[symbol] (60 × Min1, ticker, contract size, last 100 trades)
- *  - MEXC WS: sub.kline Min1 (live 1M candle), sub.deal (raw, unaggregated trades -> 10S and 1S
- *    candles), sub.ticker
+ *  - MEXC WS (the app's single shared socket, lib/mexcSocket.ts): push.kline Min1, push.deal (raw,
+ *    unaggregated trades -> 10S and 1S candles) and push.ticker for this symbol. The feed only
+ *    LISTENS. The focus owner (useScanner -> mexcSocket.setFocus) sends the sub/unsub frames, so
+ *    opening, switching and closing never create a second connection.
  * Trades from REST and WS go into one log deduplicated by trade id, so the 10S/1S charts open
  * already populated and the overlap between history and live stream never double-counts.
  * Framework-agnostic external store; snapshots are rebuilt at most every 250ms.
@@ -66,7 +59,8 @@ export function subscriptionFrames(symbol: string, op: "sub" | "unsub"): string[
 export class ContractFeed {
   private snap: ContractSnapshot;
   private listeners = new Set<() => void>();
-  private socket: ReconnectingSocket | null = null;
+  private offMessage: (() => void) | null = null;
+  private offStatus: (() => void) | null = null;
   private abort: AbortController | null = null;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private secTimer: ReturnType<typeof setInterval> | null = null;
@@ -110,17 +104,11 @@ export class ContractFeed {
     if (this.running) return;
     this.running = true;
     void this.hydrate(0);
-    this.socket = new ReconnectingSocket({
-      urls: [MEXC_WS],
-      heartbeat: { ms: 15_000, payload: JSON.stringify({ method: "ping" }) },
-      onOpen: (send) => {
-        for (const f of subscriptionFrames(this.symbol, "sub")) send(f);
-      },
-      onMessage: (d) => this.onMessage(d),
-      onStatus: (s) => {
-        this.snap = { ...this.snap, ws: s };
-        this.emit();
-      },
+    this.offMessage = mexcSocket.addListener((m) => this.onMessage(m));
+    this.offStatus = mexcSocket.onStatus((s) => {
+      if (this.snap.ws === s) return;
+      this.snap = { ...this.snap, ws: s };
+      this.emit();
     });
     this.flushTimer = setInterval(() => this.flush(), FLUSH_MS);
     this.secTimer = setInterval(() => {
@@ -131,15 +119,13 @@ export class ContractFeed {
     }, 1000);
   }
 
-  /** Sends unsub.kline / unsub.deal / unsub.ticker, closes the socket, aborts in-flight fetches, clears timers. */
+  /** Detaches from the shared socket, aborts in-flight fetches and clears timers. Unsub frames come from the focus owner. */
   stop(): void {
     if (!this.running) return;
     this.running = false;
-    if (this.socket) {
-      for (const f of subscriptionFrames(this.symbol, "unsub")) this.socket.send(f);
-      this.socket.close();
-      this.socket = null;
-    }
+    this.offMessage?.();
+    this.offStatus?.();
+    this.offMessage = this.offStatus = null;
     this.abort?.abort();
     this.abort = null;
     if (this.flushTimer) clearInterval(this.flushTimer);
@@ -192,9 +178,9 @@ export class ContractFeed {
 
   private fail(err: FeedError) {
     if (err.status === 400 || err.status === 404) {
-      // Definitive: the contract doesn't exist, so drop the socket instead of streaming nothing.
-      this.socket?.close();
-      this.socket = null;
+      // Definitive: the contract doesn't exist. Drop its channels from the shared socket instead of
+      // keeping dead subscriptions open (the drawer stays in focus mode).
+      mexcSocket.dropFocusChannels(this.symbol);
     }
     this.snap = { ...this.snap, status: "error", error: err };
     this.emit();
@@ -255,14 +241,7 @@ export class ContractFeed {
     this.emit();
   }
 
-  private onMessage(raw: string) {
-    let msg: unknown;
-    try {
-      msg = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    if (!isObj(msg) || typeof msg.channel !== "string") return;
+  private onMessage(msg: MexcMessage) {
     // Ignore late frames from a previous symbol on a shared or reconnecting socket.
     if (typeof msg.symbol === "string" && msg.symbol !== this.symbol) return;
 

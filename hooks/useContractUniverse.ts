@@ -54,6 +54,14 @@ const subscribe = (fn: () => void) => {
 };
 const getSnapshot = () => state;
 
+/**
+ * Loads the lookup list once while the scanner is showing (called after the first bootstrap),
+ * so searching inside an open drawer is purely in-memory with no request.
+ */
+export function prefetchUniverse(): void {
+  void load();
+}
+
 /** Every active MEXC *_USDT perpetual (loaded lazily; call `ensure()` on focus). */
 export function useContractUniverse() {
   const snap = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);

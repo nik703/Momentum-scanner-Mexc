@@ -211,6 +211,7 @@ export function LeaderboardTable({
   loading,
   selectedSymbol,
   onSelect,
+  paused = false,
 }: {
   title: string;
   side: "gain" | "loss";
@@ -222,6 +223,8 @@ export function LeaderboardTable({
   loading: boolean;
   selectedSymbol: string | null;
   onSelect: (symbol: string) => void;
+  /** Focus mode: the board is frozen (no re-sort or re-render) until the drawer closes. */
+  paused?: boolean;
 }) {
   const headId = `${side}-board-title`;
   let maxAbs = 0;
@@ -236,6 +239,11 @@ export function LeaderboardTable({
             <span aria-hidden className={cx("h-2 w-[3px]", side === "gain" ? "bg-gain" : "bg-loss")} />
             {title}
             <Badge>{timeframe}</Badge>
+            {paused && (
+              <Badge tone="alert" className="normal-case" >
+                Paused
+              </Badge>
+            )}
           </h2>
           <span className="num text-[11px] text-fg-3">
             {rows.length}/{totalRanked}

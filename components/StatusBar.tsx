@@ -10,12 +10,15 @@ export function StatusBar({
   lastTickAt,
   syncedAt,
   audioLocked,
+  focusSymbol,
 }: {
   status: WsStatus;
   tracked: number;
   lastTickAt: number | null;
   syncedAt: number | null;
   audioLocked: boolean;
+  /** Single-coin focus mode: market-wide stream and scanner sync are paused. */
+  focusSymbol: string | null;
 }) {
   const ok = status === "CONNECTED";
   return (
@@ -37,6 +40,11 @@ export function StatusBar({
       <span className="hidden sm:inline">
         SYNC <span className="text-fg">{fmtClock(syncedAt)}</span>
       </span>
+      {focusSymbol && (
+        <span className="text-alert" data-testid="focus-mode">
+          FOCUS {focusSymbol.replace(/_USDT$/, "")} · SCANNER PAUSED
+        </span>
+      )}
       {audioLocked && <span className="text-alert">AUDIO LOCKED · CLICK ANYWHERE OR PRESS TEST</span>}
       <span className="ml-auto hidden items-center gap-1.5 text-fg-3 lg:flex">
         <Kbd>1</Kbd>

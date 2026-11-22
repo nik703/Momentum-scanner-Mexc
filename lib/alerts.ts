@@ -63,6 +63,12 @@ export class LeaderboardAlertEngine {
   readonly losersKnownTop15 = new Set<string>();
   private contextKey: string | null = null;
 
+  /** Silently replaces both registries with the current Ranks 1–15 (no entries, no sound). */
+  reseed(gainers: readonly string[], losers: readonly string[]): void {
+    seedKnownTop15(this.gainersKnownTop15, gainers);
+    seedKnownTop15(this.losersKnownTop15, losers);
+  }
+
   tick(t: AlertTick): AlertDecision {
     if (t.gainers.length === 0 && t.losers.length === 0) {
       return { gainers: [], losers: [], audible: false, reseeded: false }; // not hydrated yet

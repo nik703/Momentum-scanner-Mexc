@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useScanner } from "@/hooks/useScanner";
+import { prefetchUniverse } from "@/hooks/useContractUniverse";
 import { useLeaderboardAlerts } from "@/hooks/useLeaderboardAlerts";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import { playLeaderboardPing, unlockAudio } from "@/lib/audio";
@@ -39,8 +40,6 @@ function focusVisibleSearch(): void {
 }
 
 export function Scanner() {
-  const snap = useScanner();
-
   const [tf, setTf] = usePersistentState<Timeframe>("mx-tf", "15M", TIMEFRAMES);
   const [minVol, setMinVol] = usePersistentState<MinVolume>("mx-minvol", "0", MIN_VOLUMES);
   const [limit, setLimit] = usePersistentState<RowLimit>("mx-limit", "25", ROW_LIMITS);
@@ -49,6 +48,23 @@ export function Scanner() {
   const [query, setQuery] = useState("");
   const [inspect, setInspect] = useState<string | null>(null);
   const closeDrawer = useCallback(() => setInspect(null), []);
+  // Single-Coin Focus Mode while the drawer is open: see useScanner.
+  const { snap, resyncing } = useScanner(inspect);
+
+  // Freeze every leaderboard input while focused, so the hidden or stale boards never re-sort or
+  // re-render (search typing, filter clicks and store snapshots included). React's "adjust state
+  // during render" pattern: no effects, no refs.
+  type BoardInputs = { rows: typeof snap.rows; tf: Timeframe; minVol: MinVolume; query: string; limit: RowLimit };
+  const [frozen, setFrozen] = useState<BoardInputs | null>(null);
+  if (inspect && !frozen) setFrozen({ rows: snap.rows, tf, minVol, query, limit });
+  if (!inspect && frozen) setFrozen(null);
+  const board: BoardInputs = frozen ?? { rows: snap.rows, tf, minVol, query, limit };
+
+  // Lookup list: fetched once, after the first scanner bootstrap, never while focused.
+  const hydrated = snap.bootstrapAt !== null;
+  useEffect(() => {
+    if (hydrated && !inspect) prefetchUniverse();
+  }, [hydrated, inspect]);
   const [audioReady, setAudioReady] = useState(false);
 
   // The head script already set data-theme before first paint, so skip the first run.
@@ -118,12 +134,12 @@ export function Scanner() {
   // Ranks the contracts that pass the volume filter. Values for every timeframe are already in memory,
   // so switching timeframe is just a re-sort with no refetch.
   const ranked = useMemo(() => {
-    const min = Number(minVol);
+    const min = Number(board.minVol);
     const gainers: BoardRow[] = [];
     const losers: BoardRow[] = [];
-    for (const r of snap.rows) {
+    for (const r of board.rows) {
       if (r.amount24 < min) continue;
-      const m = r.tf[tf];
+      const m = r.tf[board.tf];
       if (m.move === null) continue;
       const row: BoardRow = {
         rank: 0,
@@ -143,22 +159,23 @@ export function Scanner() {
     gainers.forEach((r, i) => (r.rank = i + 1));
     losers.forEach((r, i) => (r.rank = i + 1));
     return { gainers, losers, gSyms: gainers.map((r) => r.symbol), lSyms: losers.map((r) => r.symbol) };
-  }, [snap.rows, tf, minVol]);
+  }, [board.rows, board.tf, board.minVol]);
 
   const alerts = useLeaderboardAlerts({
     gainers: ranked.gSyms,
     losers: ranked.lSyms,
-    timeframe: tf,
-    minVolume: minVol,
+    timeframe: board.tf,
+    minVolume: board.minVol,
     live: snap.status === "CONNECTED",
     pingEnabled: ping === "on",
     isDrawerOpen: Boolean(inspect),
+    resyncing,
   });
 
   // Search and row count only change what is shown. Ranks stay the same.
   const view = useMemo(() => {
-    const q = normalize(query);
-    const n = limit === "all" ? Number.POSITIVE_INFINITY : Number(limit);
+    const q = normalize(board.query);
+    const n = board.limit === "all" ? Number.POSITIVE_INFINITY : Number(board.limit);
     const pick = (rows: BoardRow[]) => {
       const out: BoardRow[] = [];
       for (const r of rows) {
@@ -169,7 +186,7 @@ export function Scanner() {
       return out;
     };
     return { gainers: pick(ranked.gainers), losers: pick(ranked.losers) };
-  }, [ranked, query, limit]);
+  }, [ranked, board.query, board.limit]);
 
   const loading = snap.bootstrapAt === null;
 
@@ -190,6 +207,7 @@ export function Scanner() {
         onPing={onPing}
         onTestPing={onTestPing}
         onOpenContract={setInspect}
+        focused={inspect !== null}
       />
 
       {snap.error && loading && (
@@ -204,10 +222,11 @@ export function Scanner() {
           title="Top Gainers"
           side="gain"
           rows={view.gainers}
-          timeframe={tf}
+          timeframe={board.tf}
           newBadges={alerts.gainersNew}
           now={snap.flushedAt}
           totalRanked={ranked.gainers.length}
+          paused={inspect !== null}
           loading={loading}
           selectedSymbol={inspect}
           onSelect={setInspect}
@@ -216,10 +235,11 @@ export function Scanner() {
           title="Top Losers"
           side="loss"
           rows={view.losers}
-          timeframe={tf}
+          timeframe={board.tf}
           newBadges={alerts.losersNew}
           now={snap.flushedAt}
           totalRanked={ranked.losers.length}
+          paused={inspect !== null}
           loading={loading}
           selectedSymbol={inspect}
           onSelect={setInspect}
@@ -227,6 +247,7 @@ export function Scanner() {
       </main>
 
       <StatusBar
+        focusSymbol={inspect}
         status={snap.status}
         tracked={snap.tracked}
         lastTickAt={snap.lastTickAt}

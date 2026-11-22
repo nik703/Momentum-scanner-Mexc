@@ -31,6 +31,7 @@ export class ScannerStore {
   private prevRows = new Map<string, ScannerRow>();
   private listeners = new Set<() => void>();
   private dirty = false;
+  private paused = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private snapshot: ScannerSnapshot = {
     rows: [],
@@ -56,13 +57,34 @@ export class ScannerStore {
   getSnapshot = () => this.snapshot;
 
   start() {
-    if (this.timer) return;
+    if (this.timer || this.paused) return;
     this.timer = setInterval(() => this.flush(), FLUSH_MS);
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+  }
+
+  /**
+   * Single-coin focus mode: stop the 250ms flush entirely, so there are no candle rolls, row
+   * rebuilds or snapshot emits, and the leaderboards never re-sort or re-render. Data that
+   * arrives meanwhile (e.g. an in-flight bootstrap) is kept and published on resume().
+   */
+  pause() {
+    this.paused = true;
+    this.stop();
+  }
+
+  resume() {
+    if (!this.paused) return;
+    this.paused = false;
+    this.dirty = true;
+    this.start();
+  }
+
+  get isPaused() {
+    return this.paused;
   }
 
   /** Hydrate (first call) or reconcile (subsequent calls) from /api/scanner. */
@@ -139,6 +161,7 @@ export class ScannerStore {
   }
 
   private flush() {
+    if (this.paused) return;
     const now = Date.now();
     for (const st of this.syms.values()) {
       if (rollCandles(st, now)) this.dirty = true;

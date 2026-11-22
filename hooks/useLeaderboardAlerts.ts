@@ -9,6 +9,10 @@ import type { Timeframe } from "@/lib/types";
 export const NEW_BADGE_MS = 15_000;
 /** Chime coalescing window: entries inside it share one chime. */
 export const CHIME_COOLDOWN_MS = 1_500;
+/** After the drawer closes, ranking frames re-seed silently for this long (plus any catch-up sync). */
+export const RESUME_SETTLE_MS = 3_000;
+/** Extra silent re-seed time after a catch-up /api/scanner sync lands. */
+export const RESYNC_TAIL_MS = 1_500;
 
 interface Options {
   /** Gainers ranked 1..N (symbols), for the active timeframe and volume filter. */
@@ -23,6 +27,8 @@ interface Options {
   pingEnabled: boolean;
   /** Contract Inspection Drawer is open: leaderboard sounds are muted, tracking continues. */
   isDrawerOpen: boolean;
+  /** Catch-up /api/scanner sync after closing the drawer is in flight. */
+  resyncing?: boolean;
 }
 
 export interface LeaderboardAlerts {
@@ -53,18 +59,30 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
   const pendingChime = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pingEnabled = useRef(o.pingEnabled);
   const muted = useRef(o.isDrawerOpen);
+  const resyncing = useRef(Boolean(o.resyncing));
+  const settleUntil = useRef(0);
   const [state, setState] = useState<LeaderboardAlerts>(EMPTY);
 
   // Declared before the evaluation effect, so a commit that opens the drawer updates the
   // mute flag before that same commit's rank tick is evaluated.
   useEffect(() => {
     pingEnabled.current = o.pingEnabled;
+    // Drawer just closed: the next ranking frames are a restore of stale boards followed by
+    // fresh ticks and a catch-up sync. They re-seed silently instead of chiming late.
+    if (muted.current && !o.isDrawerOpen) settleUntil.current = Date.now() + RESUME_SETTLE_MS;
+    // The catch-up sync's own snapshot lands in the same commit that clears `resyncing`, so keep
+    // re-seeding silently for a short tail after it ends: the catch-up frame and the first
+    // ticker batches after it are part of the restore, not new Top 10 entries.
+    if (resyncing.current && !o.resyncing) {
+      settleUntil.current = Math.max(settleUntil.current, Date.now() + RESYNC_TAIL_MS);
+    }
     muted.current = o.isDrawerOpen;
+    resyncing.current = Boolean(o.resyncing);
     if (o.isDrawerOpen && pendingChime.current) {
       clearTimeout(pendingChime.current);
       pendingChime.current = null;
     }
-  }, [o.pingEnabled, o.isDrawerOpen]);
+  }, [o.pingEnabled, o.isDrawerOpen, o.resyncing]);
 
   useEffect(
     () => () => {
@@ -75,6 +93,10 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
 
   useEffect(() => {
     engine.current ??= new LeaderboardAlertEngine();
+    if (!muted.current && (resyncing.current || Date.now() < settleUntil.current)) {
+      if (o.gainers.length || o.losers.length) engine.current.reseed(o.gainers, o.losers);
+      return;
+    }
     const d = engine.current.tick({
       gainers: o.gainers,
       losers: o.losers,

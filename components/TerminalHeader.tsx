@@ -38,10 +38,12 @@ interface Props {
   onPing: (on: boolean) => void;
   onTestPing: () => void;
   onOpenContract: (symbol: string) => void;
+  /** Single-coin focus mode (drawer open): the lookup never hits the network. */
+  focused: boolean;
 }
 
 function Filters(
-  p: Pick<Props, "minVolume" | "onMinVolume" | "limit" | "onLimit" | "query" | "onQuery" | "onOpenContract">,
+  p: Pick<Props, "minVolume" | "onMinVolume" | "limit" | "onLimit" | "query" | "onQuery" | "onOpenContract" | "focused">,
 ) {
   return (
     <>
@@ -54,6 +56,7 @@ function Filters(
         query={p.query}
         onQuery={p.onQuery}
         onOpenContract={p.onOpenContract}
+        focused={p.focused}
         className="min-w-[8rem] flex-1 lg:w-52 lg:flex-none"
       />
     </>
