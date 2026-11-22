@@ -92,6 +92,18 @@ export interface ContractTicker {
   timestamp: number;
 }
 
+/** One recent trade from GET /api/contract/[symbol] (oldest first). */
+export interface ContractTrade {
+  /** MEXC trade id, used to dedupe REST history against the live sub.deal stream. */
+  id: string;
+  price: number;
+  /** Quantity in contracts. */
+  vol: number;
+  /** Taker side. */
+  side: "buy" | "sell";
+  timestampMs: number;
+}
+
 export interface ContractDetail {
   symbol: string;
   baseCoin: string;
@@ -101,6 +113,11 @@ export interface ContractDetail {
   ticker: ContractTicker;
   /** Up to 60 Min1 candles, oldest first; the last one is still forming. */
   klines: ContractKline[];
+  /**
+   * Up to 100 most recent trades, oldest first. MEXC caps this endpoint at 100 whatever `limit`
+   * is: about 7s of BTC, minutes of mid-caps. [] if unavailable. Hydrates the 10S and 1S charts.
+   */
+  trades: ContractTrade[];
   generatedAt: number;
 }
 

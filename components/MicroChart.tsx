@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -23,11 +24,12 @@ import {
   resolveOffset,
   zoomBars,
 } from "@/lib/chartViewport";
+import { buildDisplayCandles } from "@/lib/candles";
 import { fmtPrice, fmtUsd } from "@/lib/format";
 import type { Candle } from "@/lib/types";
 import { cx } from "./ui/primitives";
 
-export type ChartTimeframe = "1M" | "1S";
+export type ChartTimeframe = "1M" | "10S" | "1S";
 
 const AXIS_MIN_W = 48; // right price axis: sized to its widest label, within these bounds
 const AXIS_MAX_W = 96;
@@ -39,6 +41,10 @@ const ZOOM_STEP = 1.25; // per +/- click
 const DRAG_THRESHOLD_PX = 3;
 const BG_PRICE_KEY = "mexc_chart_bg_price";
 const BG_VALUES = ["true", "false"] as const;
+const SMOOTH_KEY = "mexc_chart_smooth";
+/** Minimum rendered body height (CSS px): Smooth keeps single-trade buckets legible. */
+const MIN_BODY_RAW = 1;
+const MIN_BODY_SMOOTH = 3;
 /** Watermark colors calibrated per theme so candles stay fully readable on top. */
 const WATERMARK = { dark: "rgba(241, 245, 249, 0.065)", light: "rgba(15, 23, 42, 0.065)" } as const;
 
@@ -78,7 +84,7 @@ function readPalette(el: Element): Palette {
 function fmtTime(t: number, tf: ChartTimeframe): string {
   const d = new Date(t);
   const p = (n: number) => String(n).padStart(2, "0");
-  return tf === "1S" ? `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}` : `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return tf === "1M" ? `${p(d.getHours())}:${p(d.getMinutes())}` : `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /** Up to 5 evenly spaced price gridlines on round values. */
@@ -182,10 +188,17 @@ export function MicroChart({
   const [axisW, setAxisW] = useState(58);
   const [views, setViews] = useState<Record<ChartTimeframe, ViewState>>({
     "1M": { bars: DEFAULT_BARS, anchorT: null },
+    "10S": { bars: DEFAULT_BARS, anchorT: null },
     "1S": { bars: DEFAULT_BARS, anchorT: null },
   });
   const [bgPref, setBgPref] = usePersistentState(BG_PRICE_KEY, "true", BG_VALUES);
   const bgPrice = bgPref === "true";
+  const [smoothPref, setSmoothPref] = usePersistentState(SMOOTH_KEY, "true", BG_VALUES);
+  const smooth = smoothPref === "true";
+  // Smoothing targets the fast trade-built charts. 1M candles are exchange OHLC and stay raw.
+  const smoothActive = smooth && timeframe !== "1M";
+  // What gets DRAWN. Prices, the live line, axis tags and the crosshair readout stay on raw `candles`.
+  const display = useMemo(() => buildDisplayCandles(candles, smoothActive), [candles, smoothActive]);
 
   // ---- derived viewport (render scope: plain values, no refs) ----
   const capacity = capacityFor(timeframe);
@@ -260,6 +273,7 @@ export function MicroChart({
     canvas.dataset.plotRight = String(plotW);
     canvas.dataset.slotWidth = vp.slotW.toFixed(3);
     canvas.dataset.bodyWidth = String(vp.bodyW);
+    canvas.dataset.minBody = String(smoothActive ? MIN_BODY_SMOOTH : MIN_BODY_RAW);
 
     if (n === 0) {
       canvas.dataset.lastBarX = "-1";
@@ -278,8 +292,9 @@ export function MicroChart({
     for (let i = vp.start; i < vp.end; i++) if (candles[i].a > 0) useTurnover = true;
     for (let i = vp.start; i < vp.end; i++) {
       const c = candles[i];
-      if (c.l < lo) lo = c.l;
-      if (c.h > hi) hi = c.h;
+      const d = display[i];
+      lo = Math.min(lo, c.l, d.l); // range covers both the exact fills and the smoothed bodies
+      hi = Math.max(hi, c.h, d.h);
       const vv = useTurnover ? c.a : c.v;
       if (vv > vmax) vmax = vv;
     }
@@ -330,37 +345,48 @@ export function MicroChart({
       canvas.dataset.bgTextWidth = "0";
     }
 
-    // 4) Volume histogram, then 5) wicks and bodies
+    // 4) Volume histogram, then 5) wicks and bodies (from the display pipeline)
     const bodyW = vp.bodyW;
+    const minBody = smoothActive ? MIN_BODY_SMOOTH : MIN_BODY_RAW;
     for (let i = vp.start; i < vp.end; i++) {
       const c = candles[i];
+      const d = display[i];
       const vv = useTurnover ? c.a : c.v;
       if (vmax > 0 && vv > 0) {
         const vh = Math.max(1 / dpr, (vv / vmax) * (volH - 2));
-        ctx.fillStyle = c.c >= c.o ? pal.gain : pal.loss;
+        ctx.fillStyle = d.c >= d.o ? pal.gain : pal.loss;
         ctx.globalAlpha = 0.45;
         ctx.fillRect(snap(candleX(vp, i) - bodyW / 2, dpr), plotH - vh, bodyW, vh);
       }
     }
     ctx.globalAlpha = 1;
     for (let i = vp.start; i < vp.end; i++) {
-      const c = candles[i];
+      const raw = candles[i];
+      const d = display[i];
       const cx0 = candleX(vp, i);
-      const col = c.c >= c.o ? pal.gain : pal.loss;
-      if (c.v > 0 || c.h !== c.l) {
+      const col = d.c >= d.o ? pal.gain : pal.loss;
+      // Buckets with no trades are dimmed: wick and body together, so the wick doesn't show through.
+      ctx.globalAlpha = raw.v > 0 ? 1 : 0.35;
+      if (raw.v > 0 || d.h !== d.l) {
         const xs = crisp(cx0, dpr);
         ctx.strokeStyle = col;
         ctx.lineWidth = 1 / dpr;
         ctx.beginPath();
-        ctx.moveTo(xs, snap(y(c.h), dpr));
-        ctx.lineTo(xs, snap(y(c.l), dpr));
+        ctx.moveTo(xs, snap(y(d.h), dpr));
+        ctx.lineTo(xs, snap(y(d.l), dpr));
         ctx.stroke();
       }
-      const top = snap(y(Math.max(c.o, c.c)), dpr);
-      const bot = snap(y(Math.min(c.o, c.c)), dpr);
+      const yO = y(d.o);
+      const yC = y(d.c);
+      let top = Math.min(yO, yC);
+      let hgt = Math.abs(yC - yO);
+      if (hgt < minBody) {
+        // Centered on the open/close midpoint so a single-trade bucket prints as a readable bar.
+        top = (yO + yC) / 2 - minBody / 2;
+        hgt = minBody;
+      }
       ctx.fillStyle = col;
-      ctx.globalAlpha = c.v > 0 ? 1 : 0.35; // padded seconds with no trades are dimmed
-      ctx.fillRect(snap(cx0 - bodyW / 2, dpr), top, bodyW, Math.max(1 / dpr, bot - top));
+      ctx.fillRect(snap(cx0 - bodyW / 2, dpr), snap(top, dpr), bodyW, Math.max(1 / dpr, snap(hgt, dpr)));
       ctx.globalAlpha = 1;
     }
     canvas.dataset.lastBarX = rightOffset === 0 ? candleX(vp, n - 1).toFixed(2) : "-1";
@@ -388,7 +414,7 @@ export function MicroChart({
     // Time labels, spaced by pixels
     ctx.fillStyle = pal.fg3;
     ctx.textAlign = "center";
-    const labelPx = timeframe === "1S" ? 74 : 56;
+    const labelPx = timeframe === "1M" ? 56 : 74;
     const every = Math.max(1, Math.ceil(labelPx / vp.slotW));
     for (let i = vp.end - 1; i >= vp.start; i -= every) {
       const xx = candleX(vp, i);
@@ -428,7 +454,7 @@ export function MicroChart({
         }
       }
     }
-  }, [candles, n, timeframe, emptyLabel, visibleBars, rightOffset, watermarkText, formatPrice, axisW]);
+  }, [candles, display, smoothActive, n, timeframe, emptyLabel, visibleBars, rightOffset, watermarkText, formatPrice, axisW]);
 
   // The latest draw lives in a ref so `schedule` stays stable; resize/observer effects don't re-run on ticks.
   const drawRef = useRef(draw);
@@ -624,7 +650,7 @@ export function MicroChart({
       {/* Toolbar: title on the left; zoom, BG price and 1M/1S on the right. Wraps on narrow phones. */}
       <div className="mb-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5" data-testid="chart-toolbar">
         <span className="whitespace-nowrap text-[10px] font-medium uppercase tracking-wider text-fg-3">{title}</span>
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
           <div className="inline-flex items-stretch overflow-hidden rounded-[3px] border border-line" role="group" aria-label="Chart zoom">
             <ToolButton label="Zoom out" testId="zoom-out" onClick={() => zoomBy(ZOOM_STEP)} disabled={visibleBars >= capacity}>
               −
@@ -643,8 +669,23 @@ export function MicroChart({
               onClick={() => setBgPref(bgPrice ? "false" : "true")}
               active={bgPrice}
             >
-              <span className="text-[10px] uppercase tracking-wider">
+              <span className="uppercase">
                 BG <span className={bgPrice ? "text-fg" : "text-fg-3"}>{bgPrice ? "ON" : "OFF"}</span>
+              </span>
+            </ToolButton>
+            <ToolButton
+              label={
+                timeframe === "1M"
+                  ? "Smooth applies to the 10S and 1S charts"
+                  : `Smooth candles ${smooth ? "on" : "off"} (gap-free Heikin-Ashi; prices stay exact)`
+              }
+              testId="smooth-toggle"
+              onClick={() => setSmoothPref(smooth ? "false" : "true")}
+              active={smoothActive}
+              disabled={timeframe === "1M"}
+            >
+              <span className="uppercase">
+                Smooth <span className={smoothActive ? "text-fg" : "text-fg-3"}>{smooth ? "ON" : "OFF"}</span>
               </span>
             </ToolButton>
           </div>
@@ -671,6 +712,15 @@ export function MicroChart({
             <span>
               V <span className="text-fg">{shown.a > 0 ? fmtUsd(shown.a) : shown.v.toLocaleString("en-US")}</span>
             </span>
+            {smoothActive && (
+              <span
+                data-testid="smooth-tag"
+                title="Bodies are smoothed. These OHLCV values are the exact market fills."
+                className="rounded-[2px] border border-line px-1 text-[9px] uppercase leading-[12px] tracking-wider text-fg-2"
+              >
+                Smooth
+              </span>
+            )}
             {hoverIdx === null && <span className="hidden text-fg-3 sm:inline">{rightOffset === 0 ? "live" : "history"}</span>}
           </>
         ) : (
@@ -685,6 +735,7 @@ export function MicroChart({
           data-visible-bars={visibleBars}
           data-right-offset={rightOffset}
           data-bg-price={bgPrice ? "on" : "off"}
+          data-smooth={smoothActive ? "on" : "off"}
           role="img"
           aria-label={`${timeframe} candlestick chart, ${n} candles, ${visibleBars} visible${rightOffset ? `, ${rightOffset} bars back` : ", following live"}`}
           onPointerDown={onPointerDown}

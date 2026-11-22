@@ -18,7 +18,18 @@ import {
   zoomBars,
 } from "../lib/chartViewport.ts";
 import { calculateBiasScore, type BiasResult } from "../lib/biasScore.ts";
-import { mergeMin1, parseDealPush, parseKlinePush, SecondCandleBuilder } from "../lib/candles.ts";
+import {
+  buildDisplayCandles,
+  mergeMin1,
+  parseDealPush,
+  parseKlinePush,
+  SEC1_KEEP,
+  SEC1_MS,
+  SEC10_KEEP,
+  SEC10_MS,
+  TradeCandleBuilder,
+} from "../lib/candles.ts";
+import { normalizeDeals } from "../lib/mexc.ts";
 import {
   instrumentBase,
   okxNotionalUsd,
@@ -306,7 +317,7 @@ check("mergeMin1 replaces the forming minute, appends new, caps at 60", () => {
   assert.equal(s[0].t, 60_000);
 });
 check("push.deal -> 1-second OHLCV buckets with turnover and flat padding", () => {
-  const b = new SecondCandleBuilder(0.0001);
+  const b = new TradeCandleBuilder(SEC1_MS, SEC1_KEEP, 0.0001);
   const base = 1795296368_000;
   for (const d of [
     { p: 100, v: 10, T: 1, t: base + 100 },
@@ -323,8 +334,91 @@ check("push.deal -> 1-second OHLCV buckets with turnover and flat padding", () =
   assert.equal(s[1].v, 0);
   assert.equal(s[1].c, 99);
   assert.equal(s[3].o, 101);
-  b.advance(base + 200_000);
-  assert.equal(b.series.length, 120); // retains last 120s
+  b.advance(base + 400_000);
+  assert.equal(b.series.length, 180); // retains last 180s (3 minutes)
+});
+
+check("10S buckets: trades across several 10-second boundaries -> exact OHLCV", () => {
+  const b = new TradeCandleBuilder(SEC10_MS, SEC10_KEEP, 0.1);
+  const t0 = 1_795_350_000_000; // a 10s boundary
+  const trades = [
+    { p: 70.0, v: 10, T: 1, t: t0 + 1_200 },
+    { p: 70.4, v: 5, T: 1, t: t0 + 4_000 },
+    { p: 69.9, v: 2, T: 2, t: t0 + 9_999 }, // last ms of bucket 0
+    { p: 70.1, v: 3, T: 1, t: t0 + 10_000 }, // first ms of bucket 1
+    { p: 70.6, v: 1, T: 1, t: t0 + 35_500 }, // bucket 3 (bucket 2 is quiet)
+    { p: 70.2, v: 4, T: 2, t: t0 + 39_000 },
+  ];
+  for (const tr of trades) b.addTrade(tr);
+  const s = b.series;
+  assert.deepEqual(s.map((c) => c.t - t0), [0, 10_000, 20_000, 30_000]);
+  assert.deepEqual([s[0].o, s[0].h, s[0].l, s[0].c, s[0].v], [70.0, 70.4, 69.9, 69.9, 17]);
+  assert.ok(Math.abs(s[0].a - (70 * 10 + 70.4 * 5 + 69.9 * 2) * 0.1) < 1e-9);
+  assert.deepEqual([s[1].o, s[1].c, s[1].v], [70.1, 70.1, 3]);
+  assert.deepEqual([s[2].o, s[2].h, s[2].l, s[2].c, s[2].v], [70.1, 70.1, 70.1, 70.1, 0], "quiet bucket = flat at prior close");
+  assert.deepEqual([s[3].o, s[3].h, s[3].l, s[3].c, s[3].v], [70.6, 70.6, 70.2, 70.2, 5]);
+  // the same trades bucketed at 1S land on 1-second boundaries
+  const one = new TradeCandleBuilder(SEC1_MS, SEC1_KEEP, 0.1);
+  for (const tr of trades) one.addTrade(tr);
+  assert.ok(one.series.every((c) => c.t % 1000 === 0));
+  assert.equal(one.series.filter((c) => c.v > 0).length, 6);
+  // retention: 90 bars (15 min)
+  b.advance(t0 + 60 * 60_000);
+  assert.equal(b.series.length, 90);
+});
+
+check("normalizeDeals: newest-first REST -> oldest-first, sides mapped, junk dropped", () => {
+  const out = normalizeDeals([
+    { p: 2, v: 1, T: 2, t: 2000, i: "b" },
+    { p: "x", v: 1, T: 1, t: 1500 },
+    { p: 1, v: 3, T: 1, t: 1000, i: 7 },
+  ]);
+  assert.deepEqual(out, [
+    { id: "7", price: 1, vol: 3, side: "buy", timestampMs: 1000 },
+    { id: "b", price: 2, vol: 1, side: "sell", timestampMs: 2000 },
+  ]);
+  assert.deepEqual(normalizeDeals(null), []);
+});
+
+check("Smooth: gap-free anchoring removes open-to-previous-close jumps", () => {
+  const raw = [
+    { t: 0, o: 100, h: 101, l: 99.5, c: 100.8, v: 3, a: 1 },
+    { t: 1, o: 102.0, h: 102.4, l: 101.9, c: 102.2, v: 1, a: 1 }, // gapped up 1.2 above prev close
+    { t: 2, o: 99.0, h: 99.2, l: 98.7, c: 98.9, v: 2, a: 1 }, // gapped down
+    { t: 3, o: 98.9, h: 98.9, l: 98.9, c: 98.9, v: 1, a: 1 }, // single-trade doji
+  ];
+  const sm = buildDisplayCandles(raw, true);
+  // stage 1: every anchored range includes the previous close, so no bar floats
+  for (let i = 1; i < raw.length; i++) {
+    assert.ok(sm[i].l <= raw[i - 1].c && sm[i].h >= raw[i - 1].c, `bar ${i} connects to previous close`);
+  }
+  // stage 2: Heikin-Ashi opens chain off the previous HA body midpoint
+  for (let i = 1; i < sm.length; i++) {
+    assert.ok(Math.abs(sm[i].o - (sm[i - 1].o + sm[i - 1].c) / 2) < 1e-12);
+    assert.ok(sm[i].h >= Math.max(sm[i].o, sm[i].c) && sm[i].l <= Math.min(sm[i].o, sm[i].c));
+  }
+  // haClose formula on bar 1: (aO + aH + aL + close) / 4 with aO = 100.8
+  assert.ok(Math.abs(sm[1].c - (100.8 + 102.4 + 100.8 + 102.2) / 4) < 1e-12);
+  // time / volume / turnover untouched; raw mode is an exact copy
+  assert.deepEqual(sm.map((c) => [c.t, c.v, c.a]), raw.map((c) => [c.t, c.v, c.a]));
+  assert.deepEqual(buildDisplayCandles(raw, false), raw);
+});
+
+check("Smooth: identical-price ticks / empty / garbage stay finite (no NaN)", () => {
+  const flat = Array.from({ length: 50 }, (_, i) => ({ t: i, o: 0.0000034, h: 0.0000034, l: 0.0000034, c: 0.0000034, v: i % 3, a: 0 }));
+  const sm = buildDisplayCandles(flat, true);
+  assert.ok(sm.every((c) => [c.o, c.h, c.l, c.c].every(Number.isFinite)));
+  assert.ok(sm.every((c) => c.o === 0.0000034 && c.c === 0.0000034), "flat stays exactly flat");
+  assert.deepEqual(buildDisplayCandles([], true), []);
+  const bad = buildDisplayCandles(
+    [
+      { t: 0, o: 1, h: 1, l: 1, c: 1, v: 1, a: 0 },
+      { t: 1, o: Number.NaN, h: 2, l: 1, c: 1.5, v: 1, a: 0 },
+      { t: 2, o: 1.5, h: 1.6, l: 1.4, c: 1.55, v: 1, a: 0 },
+    ],
+    true,
+  );
+  assert.ok(bad.slice(2).every((c) => [c.o, c.h, c.l, c.c].every(Number.isFinite)), "NaN does not propagate");
 });
 
 /* ------------------------------------------------------------------ */

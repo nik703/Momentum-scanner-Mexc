@@ -2,7 +2,7 @@ import type { Candle, ContractKline } from "./types.ts";
 
 export const MIN1_MS = 60_000;
 export const MIN1_KEEP = 60;
-export const SEC1_KEEP = 120;
+export const SEC1_KEEP = 180; // 3 minutes
 
 export function fromContractKline(k: ContractKline): Candle {
   return { t: k.timestamp, o: k.open, h: k.high, l: k.low, c: k.close, v: k.vol, a: k.amount };
@@ -39,6 +39,8 @@ export interface Trade {
   T: number;
   /** Trade time, epoch ms. */
   t: number;
+  /** MEXC trade id, when known (used for dedupe). */
+  id?: string;
 }
 
 /** push.deal data: {"p":60417.5,"v":1,"T":2,"O":1,"M":2,"t":1795296368642}. MEXC may also batch it as an array. */
@@ -51,7 +53,8 @@ export function parseDealPush(data: unknown): Trade[] {
     const v = n(d.v);
     const t = n(d.t);
     if (p === null || v === null || t === null || p <= 0 || v < 0) continue;
-    out.push({ p, v, T: n(d.T) ?? 0, t });
+    const id = typeof d.i === "string" || typeof d.i === "number" ? String(d.i) : undefined;
+    out.push({ p, v, T: n(d.T) ?? 0, t, id });
   }
   return out;
 }
@@ -75,25 +78,33 @@ export function mergeMin1(series: Candle[], c: Candle): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* 1-second candles built from trades                                  */
+/* Sub-minute candles built from trades (10S and 1S)                   */
 /* ------------------------------------------------------------------ */
 
+export const SEC10_MS = 10_000;
+export const SEC10_KEEP = 90; // 15 minutes
+export const SEC1_MS = 1_000;
+
+/** Bucket start for a trade time: Math.floor(ts / bucketMs) * bucketMs. */
+export const bucketStart = (ts: number, bucketMs: number): number => Math.floor(ts / bucketMs) * bucketMs;
+
 /**
- * Buckets raw trades into 1-second OHLCV candles and keeps the last 120 seconds.
- * Quiet seconds become flat candles (o=h=l=c=previous close, v=0), so the time axis
- * stays linear and the chart keeps moving even when no one trades.
+ * Buckets raw trades into fixed-width OHLCV candles (10S: 10_000ms × 90 bars, 1S: 1_000ms × 180
+ * bars). Quiet buckets become flat candles (o=h=l=c=previous close, v=0), so the time axis stays
+ * linear and the chart keeps moving when no one trades.
  */
-export class SecondCandleBuilder {
+export class TradeCandleBuilder {
   private candles: Candle[] = [];
   private lastClose: number | null = null;
 
   constructor(
+    readonly bucketMs: number,
+    readonly keep: number,
     /** Base units per contract, so v × p × contractSize is USDT turnover. Null means turnover is unknown. */
     private contractSize: number | null,
-    private keep = SEC1_KEEP,
   ) {}
 
-  /** Seeds the last price (e.g. from the latest Min1 close) so flat seconds can start before the first trade. */
+  /** Seeds the last price (e.g. from the latest Min1 close) so flat buckets can start before the first trade. */
   seed(price: number): void {
     if (this.lastClose === null && price > 0) this.lastClose = price;
   }
@@ -103,14 +114,15 @@ export class SecondCandleBuilder {
   }
 
   addTrade(tr: Trade): void {
-    const sec = Math.floor(tr.t / 1000) * 1000;
+    const b = bucketStart(tr.t, this.bucketMs);
     const turnover = this.contractSize ? tr.p * tr.v * this.contractSize : 0;
     const last = this.candles[this.candles.length - 1];
 
-    if (last && sec < last.t) {
-      // Late trade: update its second if it is still inside the window.
-      const c = this.candles.find((x) => x.t === sec);
+    if (last && b < last.t) {
+      // Late trade: update its bucket if it is still inside the window.
+      const c = this.candles.find((x) => x.t === b);
       if (c) {
+        if (c.v === 0) c.o = c.h = c.l = c.c = tr.p;
         c.h = Math.max(c.h, tr.p);
         c.l = Math.min(c.l, tr.p);
         c.v += tr.v;
@@ -118,33 +130,31 @@ export class SecondCandleBuilder {
       }
       return;
     }
-    this.advance(sec);
+    this.advance(b);
     const cur = this.candles[this.candles.length - 1];
-    if (cur && cur.t === sec) {
-      if (cur.v === 0) {
-        // First real trade of a padded second: it sets the open.
-        cur.o = cur.h = cur.l = tr.p;
-      }
+    if (cur && cur.t === b) {
+      if (cur.v === 0) cur.o = cur.h = cur.l = tr.p; // first real trade of a padded bucket sets the open
       cur.h = Math.max(cur.h, tr.p);
       cur.l = Math.min(cur.l, tr.p);
       cur.c = tr.p;
       cur.v += tr.v;
       cur.a += turnover;
     } else {
-      this.candles.push({ t: sec, o: tr.p, h: tr.p, l: tr.p, c: tr.p, v: tr.v, a: turnover });
+      this.candles.push({ t: b, o: tr.p, h: tr.p, l: tr.p, c: tr.p, v: tr.v, a: turnover });
     }
     this.lastClose = tr.p;
     this.trim();
   }
 
-  /** Pads flat candles up to and including `nowSec` (epoch ms floored to the second). Returns whether anything changed. */
-  advance(nowSec: number): boolean {
+  /** Pads flat candles up to and including the bucket containing `now`. Returns whether anything changed. */
+  advance(now: number): boolean {
     if (this.lastClose === null) return false;
+    const target = bucketStart(now, this.bucketMs);
     const last = this.candles[this.candles.length - 1];
-    let t = last ? last.t + 1000 : nowSec;
-    if (last && nowSec - last.t > this.keep * 1000) t = nowSec - (this.keep - 1) * 1000; // long gap: skip ahead
+    let t = last ? last.t + this.bucketMs : target;
+    if (last && target - last.t > this.keep * this.bucketMs) t = target - (this.keep - 1) * this.bucketMs; // long gap: skip ahead
     let changed = false;
-    for (; t <= nowSec; t += 1000) {
+    for (; t <= target; t += this.bucketMs) {
       const p = this.lastClose;
       this.candles.push({ t, o: p, h: p, l: p, c: p, v: 0, a: 0 });
       changed = true;
@@ -156,4 +166,55 @@ export class SecondCandleBuilder {
   private trim() {
     if (this.candles.length > this.keep) this.candles.splice(0, this.candles.length - this.keep);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Display pipeline: raw vs Smooth (gap-free + Heikin-Ashi)            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Candles to DRAW (pricing, the live price line and the crosshair always use the raw candles).
+ *
+ *  smooth = false: the raw trade OHLC, unchanged.
+ *  smooth = true:
+ *    1. Gap-free anchoring: for i > 0, anchoredOpen = raw[i-1].close and the high/low are widened
+ *       to include it, so consecutive candles connect instead of jumping in mid-air.
+ *    2. Heikin-Ashi: haClose = (aO + aH + aL + close) / 4, haOpen = (prevHaOpen + prevHaClose) / 2
+ *       (seeded with (aO + close) / 2), haHigh = max(aH, haOpen, haClose), haLow = min(aL, haOpen, haClose).
+ *  Time, volume and turnover always pass through untouched. Non-finite input is never propagated.
+ */
+export function buildDisplayCandles(raw: readonly Candle[], smooth: boolean): Candle[] {
+  if (!smooth) return raw.slice();
+  const out: Candle[] = new Array(raw.length);
+  let prevHaOpen = 0;
+  let prevHaClose = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const r = raw[i];
+    const prevClose = i > 0 ? raw[i - 1].c : r.o;
+    const aO = Number.isFinite(prevClose) && prevClose > 0 ? prevClose : r.o;
+    const aH = Math.max(r.h, aO);
+    const aL = Math.min(r.l, aO);
+    const haClose = (aO + aH + aL + r.c) / 4;
+    const haOpen = i === 0 ? (aO + r.c) / 2 : (prevHaOpen + prevHaClose) / 2;
+    const c: Candle = {
+      t: r.t,
+      o: haOpen,
+      h: Math.max(aH, haOpen, haClose),
+      l: Math.min(aL, haOpen, haClose),
+      c: haClose,
+      v: r.v,
+      a: r.a,
+    };
+    if (![c.o, c.h, c.l, c.c].every(Number.isFinite)) {
+      // Defensive: fall back to the raw bar instead of propagating NaN into every later candle.
+      out[i] = { ...r };
+      prevHaOpen = r.o;
+      prevHaClose = r.c;
+      continue;
+    }
+    out[i] = c;
+    prevHaOpen = haOpen;
+    prevHaClose = haClose;
+  }
+  return out;
 }

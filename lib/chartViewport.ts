@@ -15,8 +15,9 @@ export const DEFAULT_BARS = 36;
 export const RIGHT_MARGIN_PX = 8;
 export const BODY_RATIO = 0.68;
 
-export function capacityFor(timeframe: "1M" | "1S"): number {
-  return timeframe === "1S" ? 120 : 60;
+/** Buffer capacity per timeframe: 1M = 60 bars (1h), 10S = 90 (15m), 1S = 180 (3m). */
+export function capacityFor(timeframe: "1M" | "10S" | "1S"): number {
+  return timeframe === "1S" ? 180 : timeframe === "10S" ? 90 : 60;
 }
 
 export function clampBars(bars: number, capacity: number): number {

@@ -1,4 +1,15 @@
-import { fromContractKline, mergeMin1, parseDealPush, parseKlinePush, SecondCandleBuilder } from "./candles.ts";
+import {
+  fromContractKline,
+  mergeMin1,
+  parseDealPush,
+  parseKlinePush,
+  SEC1_KEEP,
+  SEC1_MS,
+  SEC10_KEEP,
+  SEC10_MS,
+  TradeCandleBuilder,
+  type Trade,
+} from "./candles.ts";
 import { ReconnectingSocket, type SocketStatus } from "./reconnectingSocket.ts";
 import type { ApiError, Candle, ContractDetail, ContractTicker } from "./types.ts";
 
@@ -6,6 +17,8 @@ const MEXC_WS = "wss://contract.mexc.com/edge";
 const FLUSH_MS = 250;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_FETCH_RETRIES = 3;
+/** Raw trades kept for re-bucketing on hydration (bounded; only the last ~15 min matter for 10S). */
+const TRADE_LOG_MAX = 20_000;
 
 export interface FeedError {
   status: number;
@@ -20,6 +33,9 @@ export interface ContractSnapshot {
   /** REST ticker, then overwritten field by field by push.ticker frames. */
   ticker: ContractTicker | null;
   min1: readonly Candle[];
+  /** 10-second candles from REST trade history + live trades (up to 90 = 15 min). */
+  sec10: readonly Candle[];
+  /** 1-second candles from REST trade history + live trades (up to 180 = 3 min). */
   sec1: readonly Candle[];
   ws: SocketStatus;
   lastTradeAt: number | null;
@@ -32,15 +48,18 @@ const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !
 export function subscriptionFrames(symbol: string, op: "sub" | "unsub"): string[] {
   return [
     JSON.stringify({ method: `${op}.kline`, param: { symbol, interval: "Min1" } }),
-    JSON.stringify({ method: `${op}.deal`, param: { symbol, compress: false } }),
+    JSON.stringify({ method: `${op}.deal`, param: { symbol, compress: false, reduce: false } }),
     JSON.stringify({ method: `${op}.ticker`, param: { symbol } }),
   ];
 }
 
 /**
  * Live data for one contract in the Inspection Drawer:
- *  - REST hydrate from /api/contract/[symbol] (60 × Min1 + ticker + contract size)
- *  - MEXC WS: sub.kline Min1 (live 1M candle), sub.deal (raw trades -> 1S candles), sub.ticker
+ *  - REST hydrate from /api/contract/[symbol] (60 × Min1, ticker, contract size, last 100 trades)
+ *  - MEXC WS: sub.kline Min1 (live 1M candle), sub.deal (raw, unaggregated trades -> 10S and 1S
+ *    candles), sub.ticker
+ * Trades from REST and WS go into one log deduplicated by trade id, so the 10S/1S charts open
+ * already populated and the overlap between history and live stream never double-counts.
  * Framework-agnostic external store; snapshots are rebuilt at most every 250ms.
  * start() and stop() can be called repeatedly (React Strict Mode mounts effects twice).
  */
@@ -53,7 +72,11 @@ export class ContractFeed {
   private secTimer: ReturnType<typeof setInterval> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private min1: Candle[] = [];
-  private sec1: SecondCandleBuilder = new SecondCandleBuilder(null);
+  private sec10 = new TradeCandleBuilder(SEC10_MS, SEC10_KEEP, null);
+  private sec1 = new TradeCandleBuilder(SEC1_MS, SEC1_KEEP, null);
+  /** Every trade seen (REST + live), ascending by arrival; ids dedupe the REST/WS overlap. */
+  private tradeLog: Trade[] = [];
+  private tradeIds = new Set<string>();
   private ticker: ContractTicker | null = null;
   private lastTradeAt: number | null = null;
   private dirty = false;
@@ -67,6 +90,7 @@ export class ContractFeed {
       detail: null,
       ticker: null,
       min1: [],
+      sec10: [],
       sec1: [],
       ws: "connecting",
       lastTradeAt: null,
@@ -100,7 +124,10 @@ export class ContractFeed {
     });
     this.flushTimer = setInterval(() => this.flush(), FLUSH_MS);
     this.secTimer = setInterval(() => {
-      if (this.sec1.advance(Math.floor(Date.now() / 1000) * 1000)) this.dirty = true;
+      const now = Date.now();
+      const a = this.sec1.advance(now);
+      const b = this.sec10.advance(now);
+      if (a || b) this.dirty = true;
     }, 1000);
   }
 
@@ -181,12 +208,39 @@ export class ContractFeed {
     for (const c of live) if (c.t >= lastBase) mergeMin1(base, c);
     this.min1 = base;
 
-    const prevSec = this.sec1.series;
-    this.sec1 = new SecondCandleBuilder(detail.contractSize);
-    const lastClose = base[base.length - 1]?.c ?? detail.ticker.lastPrice;
-    this.sec1.seed(lastClose);
-    // Re-add any seconds built before hydration (their turnover was unknown until now).
-    for (const c of prevSec) if (c.v > 0) this.sec1.addTrade({ p: c.c, v: c.v, T: 0, t: c.t });
+    // REST trade history + any live trades received before hydration -> one deduplicated log,
+    // re-bucketed in time order into fresh 10S and 1S builders that now know the contract size.
+    const history: Trade[] = (detail.trades ?? []).map((t) => ({
+      p: t.price,
+      v: t.vol,
+      T: t.side === "sell" ? 2 : 1,
+      t: t.timestampMs,
+      id: t.id,
+    }));
+    const merged: Trade[] = [];
+    const ids = new Set<string>();
+    for (const t of [...history, ...this.tradeLog]) {
+      if (t.id) {
+        if (ids.has(t.id)) continue;
+        ids.add(t.id);
+      }
+      merged.push(t);
+    }
+    merged.sort((a, b) => a.t - b.t);
+    this.tradeLog = merged.slice(-TRADE_LOG_MAX);
+    this.tradeIds = ids;
+    this.sec10 = new TradeCandleBuilder(SEC10_MS, SEC10_KEEP, detail.contractSize);
+    this.sec1 = new TradeCandleBuilder(SEC1_MS, SEC1_KEEP, detail.contractSize);
+    const seed = merged[0]?.p ?? base[base.length - 1]?.c ?? detail.ticker.lastPrice;
+    this.sec10.seed(seed);
+    this.sec1.seed(seed);
+    for (const t of merged) {
+      this.sec10.addTrade(t);
+      this.sec1.addTrade(t);
+    }
+    const now = Date.now();
+    this.sec10.advance(now);
+    this.sec1.advance(now);
 
     this.snap = {
       ...this.snap,
@@ -195,6 +249,7 @@ export class ContractFeed {
       detail,
       ticker: (this.ticker = { ...detail.ticker, ...(this.ticker ?? {}) }),
       min1: this.min1.slice(),
+      sec10: this.sec10.series.slice(),
       sec1: this.sec1.series.slice(),
     };
     this.emit();
@@ -222,11 +277,29 @@ export class ContractFeed {
       }
       case "push.deal": {
         const trades = parseDealPush(msg.data);
-        if (trades.length) {
-          for (const t of trades) this.sec1.addTrade(t);
-          this.lastTradeAt = trades[trades.length - 1].t;
-          this.dirty = true;
+        let added = 0;
+        for (const t of trades) {
+          if (t.id) {
+            if (this.tradeIds.has(t.id)) continue; // already in the REST history
+            this.tradeIds.add(t.id);
+          }
+          this.tradeLog.push(t);
+          this.sec10.addTrade(t);
+          this.sec1.addTrade(t);
+          this.lastTradeAt = t.t;
+          added++;
         }
+        // Trades arrive far more often than push.ticker (~1/s): advance lastPrice from the newest
+        // fill so the headline, watermark and price line never lag the tape.
+        const newest = trades[trades.length - 1];
+        if (added && this.ticker && newest.t >= this.ticker.timestamp) {
+          this.ticker = { ...this.ticker, lastPrice: newest.p, timestamp: newest.t };
+        }
+        if (this.tradeLog.length > TRADE_LOG_MAX * 1.25) {
+          const drop = this.tradeLog.splice(0, this.tradeLog.length - TRADE_LOG_MAX);
+          for (const t of drop) if (t.id) this.tradeIds.delete(t.id);
+        }
+        if (added) this.dirty = true;
         break;
       }
       case "push.ticker": {
@@ -245,7 +318,14 @@ export class ContractFeed {
           const v = pick(k);
           if (v !== undefined) next[k] = v;
         }
-        if (prev) this.ticker = { ...prev, ...next };
+        if (prev) {
+          // An older ticker frame must not roll lastPrice back behind a newer trade.
+          if (next.timestamp !== undefined && next.timestamp < prev.timestamp) {
+            delete next.lastPrice;
+            delete next.timestamp;
+          }
+          this.ticker = { ...prev, ...next };
+        }
         else if (next.lastPrice !== undefined) {
           this.ticker = {
             lastPrice: next.lastPrice,
@@ -277,6 +357,7 @@ export class ContractFeed {
       ticker: this.ticker,
       lastTradeAt: this.lastTradeAt,
       min1: this.min1.slice(),
+      sec10: this.sec10.series.slice(),
       sec1: this.sec1.series.slice(),
     };
     this.emit();

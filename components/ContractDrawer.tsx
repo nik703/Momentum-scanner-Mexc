@@ -14,7 +14,8 @@ import { Badge, SegmentedControl, cx } from "./ui/primitives";
 
 const CHART_TFS = [
   { value: "1M", label: "1M", hint: "1-minute candles (MEXC Min1 kline stream)" },
-  { value: "1S", label: "1S", hint: "1-second candles built from live trades (last 120s)" },
+  { value: "10S", label: "10S", hint: "10-second candles from recent + live trades (last 15m)" },
+  { value: "1S", label: "1S", hint: "1-second candles from recent + live trades (last 3m)" },
 ] as const;
 
 /**
@@ -259,16 +260,16 @@ function InspectorBody({
       {/* Chart: the toolbar (title, zoom, BG price, 1M/1S) is rendered by MicroChart */}
       <div className="border-b border-line px-2 py-2 sm:px-3">
         <MicroChart
-          candles={tf === "1M" ? feed.min1 : feed.sec1}
+          candles={tf === "1M" ? feed.min1 : tf === "10S" ? feed.sec10 : feed.sec1}
           timeframe={tf}
-          title={tf === "1M" ? "1-minute · last 60m" : "1-second · last 120s"}
+          title={tf === "1M" ? "1-minute · 60m" : tf === "10S" ? "10-second · 15m" : "1-second · 3m"}
           timeframeControl={
             <SegmentedControl label="Chart timeframe" value={tf} onChange={setTf} options={CHART_TFS} mono compact />
           }
           livePrice={feed.ticker?.lastPrice ?? null}
           formatPrice={chartFmt}
           emptyLabel={
-            feed.status === "loading" ? `Loading ${symbol}…` : tf === "1S" ? "Waiting for trades…" : "No candles"
+            feed.status === "loading" ? `Loading ${symbol}…` : tf === "1M" ? "No candles" : "Waiting for trades…"
           }
         />
       </div>

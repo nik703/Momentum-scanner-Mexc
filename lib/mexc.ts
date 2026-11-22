@@ -4,6 +4,7 @@ import type {
   ContractDetail,
   ContractKline,
   ContractTicker,
+  ContractTrade,
   UniverseItem,
 } from "./types.ts";
 
@@ -189,12 +190,44 @@ async function getJsonRetry<T>(url: string): Promise<T> {
   }
 }
 
+interface RawDeal {
+  p: number;
+  v: number;
+  /** 1 = taker buy, 2 = taker sell */
+  T: number;
+  t: number;
+  i?: string | number;
+}
+
+/** Normalizes /deals (newest first, max 100) to oldest-first ContractTrade[]; malformed rows are dropped. */
+export function normalizeDeals(raw: unknown): ContractTrade[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ContractTrade[] = [];
+  for (const d of raw as RawDeal[]) {
+    if (!d || typeof d !== "object") continue;
+    const price = num(d.p, Number.NaN);
+    const vol = num(d.v, Number.NaN);
+    const ts = num(d.t, Number.NaN);
+    if (!(price > 0) || !(vol >= 0) || !(ts > 0)) continue;
+    out.push({
+      id: d.i !== undefined ? String(d.i) : `${ts}:${price}:${vol}`,
+      price,
+      vol,
+      side: d.T === 2 ? "sell" : "buy",
+      timestampMs: ts,
+    });
+  }
+  return out.sort((a, b) => a.timestampMs - b.timestampMs);
+}
+
 export async function fetchContractDetail(symbol: string): Promise<ContractDetail> {
   const q = encodeURIComponent(symbol);
-  const [klineR, tickerR, infoR] = await Promise.allSettled([
+  // All legs run in parallel. Trades are optional: a failure or empty list falls back to [].
+  const [klineR, tickerR, infoR, dealsR] = await Promise.allSettled([
     getJsonRetry<RawKlineFull>(`${BASE}/kline/${q}?interval=Min1&limit=60`),
     getJsonRetry<RawTickerFull>(`${BASE}/ticker?symbol=${q}`),
     getJsonRetry<RawContractInfo>(`${BASE}/detail?symbol=${q}`),
+    getJson<RawDeal[]>(`${BASE}/deals/${q}?limit=100`),
   ]);
 
   // A 1001 from any leg means the contract does not exist.
@@ -254,6 +287,7 @@ export async function fetchContractDetail(symbol: string): Promise<ContractDetai
     priceScale: info && Number.isInteger(info.priceScale) ? info.priceScale : null,
     ticker,
     klines,
+    trades: dealsR.status === "fulfilled" ? normalizeDeals(dealsR.value) : [],
     generatedAt: Date.now(),
   };
 }

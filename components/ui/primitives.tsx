@@ -70,7 +70,8 @@ export function SegmentedControl<T extends string>({
             title={o.hint}
             onClick={() => onChange(o.value)}
             className={cx(
-              "px-2 text-[11.5px] font-medium transition-colors [&+&]:border-l [&+&]:border-line",
+              "px-2 font-medium transition-colors [&+&]:border-l [&+&]:border-line",
+              compact ? "text-[11px]" : "text-[11.5px]",
               mono && "num",
               active ? "bg-row-hover text-fg" : "text-fg-2 hover:text-fg",
             )}
