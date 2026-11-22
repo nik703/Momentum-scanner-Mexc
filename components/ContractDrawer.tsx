@@ -5,7 +5,8 @@ import { useContractFeed } from "@/hooks/useContractFeed";
 import { useCrossExchangeLiquidations } from "@/hooks/useCrossExchangeLiquidations";
 import { calculateBiasScore } from "@/lib/biasScore";
 import type { ContractSnapshot } from "@/lib/contractFeed";
-import { fmtPct, fmtPrice, fmtUsd } from "@/lib/format";
+import { fmtPct, fmtUsd1, makePriceFormatter } from "@/lib/format";
+import type { ContractTicker } from "@/lib/types";
 import { DirectionalBiasBar } from "./DirectionalBiasBar";
 import { LiquidationsPanel } from "./LiquidationsPanel";
 import { MicroChart, type ChartTimeframe } from "./MicroChart";
@@ -16,11 +17,105 @@ const CHART_TFS = [
   { value: "1S", label: "1S", hint: "1-second candles built from live trades (last 120s)" },
 ] as const;
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
+/**
+ * Live last price. Its color follows the direction of the latest tick, and a hairline-free
+ * background flash re-triggers on every change. Uses React's "adjust state while rendering"
+ * pattern to compare with the previous value, so there are no effects and no reads of refs
+ * during render.
+ */
+function LivePrice({ value, text }: { value: number | null; text: string }) {
+  const [prev, setPrev] = useState(value);
+  const [tick, setTick] = useState<{ dir: -1 | 0 | 1; seq: number }>({ dir: 0, seq: 0 });
+  if (value !== prev) {
+    setPrev(value);
+    if (value !== null && prev !== null) setTick({ dir: value > prev ? 1 : -1, seq: tick.seq + 1 });
+  }
   return (
-    <div className="min-w-0 px-2 py-1.5 sm:px-3">
-      <div className="text-[9.5px] font-medium uppercase tracking-wider text-fg-3">{label}</div>
-      <div className={cx("num truncate text-[12px]", tone ?? "text-fg")}>{value}</div>
+    <span
+      data-testid="drawer-price"
+      className={cx(
+        "num relative block whitespace-nowrap text-lg font-semibold leading-none tracking-tight tabular-nums sm:text-2xl",
+        tick.dir > 0 ? "text-gain" : tick.dir < 0 ? "text-loss" : "text-fg",
+      )}
+    >
+      {tick.seq > 0 && (
+        <span
+          key={tick.seq}
+          aria-hidden
+          className={cx("pointer-events-none absolute -inset-x-1 -inset-y-0.5", tick.dir > 0 ? "flash-gain" : "flash-loss")}
+        />
+      )}
+      <span className="relative">{text}</span>
+    </span>
+  );
+}
+
+/** One cell of the 2x2 metadata grid: short label on mobile, full label from sm up. */
+function MetaCell({
+  stat,
+  short,
+  long,
+  value,
+  tone,
+}: {
+  stat: string;
+  short: string;
+  long: string;
+  value: string;
+  tone?: string;
+}) {
+  return (
+    <div data-stat={stat} className="whitespace-nowrap" title={`${long}: ${value}`}>
+      <span className="mr-1 text-[9px] uppercase tracking-wider text-fg-3 sm:text-[9.5px]">
+        <span className="sm:hidden">{short}</span>
+        <span className="hidden sm:inline">{long}</span>
+      </span>
+      <span className={tone ?? "text-fg"}>{value}</span>
+    </div>
+  );
+}
+
+/**
+ * Price + ticker strip. A single row at every width: the live price on the left and a 2x2
+ * metadata grid (Mark / Index / Funding / 24h turnover) on the right. On mobile it stays
+ * ≤ 44px tall and fits a 12-character sub-cent price at 360px. From sm up it gets more
+ * padding, a larger price and full labels.
+ */
+function PriceStrip({ ticker: t, priceScale }: { ticker: ContractTicker | null; priceScale: number | null }) {
+  const fmt = useMemo(() => makePriceFormatter(t?.lastPrice ?? 0, priceScale), [t?.lastPrice, priceScale]);
+  const change = t ? t.riseFallRate * 100 : null;
+  const funding = t ? t.fundingRate * 100 : null;
+  return (
+    <div
+      data-testid="drawer-price-row"
+      className="flex items-center justify-between gap-2 border-b border-line px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between sm:px-4 sm:py-2.5"
+    >
+      <div data-testid="drawer-price-block" className="shrink-0">
+        <LivePrice value={t?.lastPrice ?? null} text={t ? fmt(t.lastPrice) : "—"} />
+        <div
+          className={cx(
+            "num mt-px whitespace-nowrap text-[11px] leading-[12px] tabular-nums sm:mt-1",
+            change === null ? "text-fg-3" : change >= 0 ? "text-gain" : "text-loss",
+          )}
+        >
+          {fmtPct(change)} <span className="text-fg-3">24h</span>
+        </div>
+      </div>
+      <div
+        data-testid="drawer-stats-grid"
+        className="num grid min-w-0 grid-cols-2 grid-rows-2 gap-x-2.5 gap-y-0.5 text-right text-[10px] leading-tight tabular-nums sm:gap-x-5 sm:gap-y-1 sm:text-[11px]"
+      >
+        <MetaCell stat="mark" short="MRK" long="Mark" value={t ? fmt(t.fairPrice) : "—"} />
+        <MetaCell stat="index" short="IDX" long="Index" value={t ? fmt(t.indexPrice) : "—"} />
+        <MetaCell
+          stat="funding"
+          short="FND"
+          long="Funding"
+          value={funding === null ? "—" : fmtPct(funding, 4)}
+          tone={funding === null || funding === 0 ? "text-fg" : funding > 0 ? "text-gain" : "text-loss"}
+        />
+        <MetaCell stat="turnover" short="24H" long="24h Vol" value={t ? fmtUsd1(t.amount24) : "—"} />
+      </div>
     </div>
   );
 }
@@ -144,41 +239,12 @@ function InspectorBody({
     [feed.min1, liqs.window15m.longUsd, liqs.window15m.shortUsd],
   );
 
-  const t = feed.ticker;
-  const change = t ? t.riseFallRate * 100 : null;
   const liqReady = liqs.status.BN === "open" || liqs.status.BYB === "open" || liqs.status.OKX === "open";
 
   return (
     <>
-      {/* Price strip */}
-      <div className="flex items-end justify-between gap-3 border-b border-line px-2 py-2 sm:px-3">
-        <div>
-          <div className="num text-[22px] font-semibold leading-none" data-testid="drawer-price">
-            {t ? fmtPrice(t.lastPrice) : "—"}
-          </div>
-          <div className={cx("num mt-1 text-[11px]", change === null ? "text-fg-3" : change >= 0 ? "text-gain" : "text-loss")}>
-            {fmtPct(change)} 24h
-          </div>
-        </div>
-        <div className="num text-right text-[10.5px] text-fg-3">
-          <div>
-            H <span className="text-fg-2">{t ? fmtPrice(t.high24Price) : "—"}</span>
-          </div>
-          <div>
-            L <span className="text-fg-2">{t ? fmtPrice(t.lower24Price) : "—"}</span>
-          </div>
-        </div>
-      </div>
-      <div className="grid grid-cols-2 border-b border-line sm:grid-cols-4 [&>*]:border-line [&>*:nth-child(odd)]:border-r sm:[&>*]:border-r sm:[&>*:last-child]:border-r-0">
-        <Stat label="Mark" value={t ? fmtPrice(t.fairPrice) : "—"} />
-        <Stat label="Index" value={t ? fmtPrice(t.indexPrice) : "—"} />
-        <Stat
-          label="Funding"
-          value={t ? fmtPct(t.fundingRate * 100, 4) : "—"}
-          tone={!t ? undefined : t.fundingRate > 0 ? "text-gain" : t.fundingRate < 0 ? "text-loss" : "text-fg"}
-        />
-        <Stat label="24h Turnover" value={t ? fmtUsd(t.amount24) : "—"} />
-      </div>
+      {/* Price + 2x2 ticker strip (single row at all widths) */}
+      <PriceStrip ticker={feed.ticker} priceScale={feed.detail?.priceScale ?? null} />
 
       {/* Bias */}
       <div className="border-b border-line px-2 pb-3 pt-2.5 sm:px-3">
