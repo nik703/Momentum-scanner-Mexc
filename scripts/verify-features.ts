@@ -7,6 +7,16 @@
 import assert from "node:assert/strict";
 import { LeaderboardAlertEngine } from "../lib/alerts.ts";
 import { nextPingSlot } from "../lib/audio.ts";
+import {
+  anchorFor,
+  candleX,
+  clampBars,
+  computeViewport,
+  fitWatermarkPx,
+  indexAtX,
+  resolveOffset,
+  zoomBars,
+} from "../lib/chartViewport.ts";
 import { calculateBiasScore, type BiasResult } from "../lib/biasScore.ts";
 import { mergeMin1, parseDealPush, parseKlinePush, SecondCandleBuilder } from "../lib/candles.ts";
 import {
@@ -423,6 +433,65 @@ check("90ms cadence limiter spaces a 3-exchange burst and caps backlog", () => {
   assert.equal(played, 9);
   // once the clock moves past the backlog, pings flow again immediately
   assert.deepEqual(nextPingSlot(25, free), { at: 25, nextFree: 25.09 });
+});
+
+/* ------------------------------------------------------------------ */
+console.log("\n[6] Chart viewport: zoom, follow, pan, watermark");
+
+check("zoom clamps to [10, capacity] and always moves >= 1 bar per step", () => {
+  assert.equal(clampBars(3, 60), 10);
+  assert.equal(clampBars(500, 120), 120);
+  assert.equal(zoomBars(36, 0.8, 60), 28);
+  assert.equal(zoomBars(11, 0.99, 60), 10);
+  assert.equal(zoomBars(10, 0.5, 60), 10);
+  assert.equal(zoomBars(58, 1.25, 60), 60);
+  assert.equal(zoomBars(36, 1.001, 60), 37);
+});
+
+check("follow mode: newest candle sits in the rightmost slot at every zoom level", () => {
+  const plotW = 300;
+  for (const bars of [10, 23, 36, 60]) {
+    const vp = computeViewport(60, bars, 0, plotW);
+    assert.equal(vp.end, 60);
+    assert.equal(vp.start, 60 - bars);
+    assert.ok(Math.abs(candleX(vp, 59) - (plotW - vp.slotW / 2)) < 1e-9);
+    assert.equal(vp.bodyW, Math.max(2, Math.floor((plotW / bars) * 0.68)));
+  }
+  // zooming in -> wider candles
+  assert.ok(computeViewport(60, 10, 0, 300).bodyW > computeViewport(60, 36, 0, 300).bodyW);
+  // body never collapses below 2px, even at 120 bars in a narrow plot
+  assert.equal(computeViewport(120, 120, 0, 200).bodyW, 2);
+});
+
+check("short series right-align (no stretching) and index/X round-trip", () => {
+  const vp = computeViewport(5, 36, 0, 360);
+  assert.equal(vp.start, 0);
+  for (let i = 0; i < 5; i++) assert.equal(indexAtX(vp, candleX(vp, i)), i);
+  assert.equal(indexAtX(vp, 1), -1); // empty slots on the left
+});
+
+check("pan anchors to a timestamp: new live bars don't drag the historical view", () => {
+  const times = Array.from({ length: 60 }, (_, i) => i * 60_000);
+  const anchor = anchorFor(times, 12, 36);
+  assert.equal(anchor, times[47]);
+  assert.equal(resolveOffset(times, anchor, 36), 12);
+  // a new minute arrives and the buffer shifts by one (60-cap)
+  const next = [...times.slice(1), 60 * 60_000];
+  assert.equal(resolveOffset(next, anchor, 36), 13, "same bars stay in view");
+  // offsets clamp to the available history; offset 0 => follow (null anchor)
+  assert.equal(resolveOffset(times, anchorFor(times, 999, 36), 36), 24);
+  assert.equal(anchorFor(times, 0, 36), null);
+  assert.equal(anchorFor(times, -5, 36), null);
+  assert.equal(resolveOffset(times, null, 36), 0);
+});
+
+check("watermark font fits ~60% of plot width, clamped 28..68px", () => {
+  // 98,420.5 at 100px mono ~ 480px wide; plot 420px -> 52.5px
+  assert.ok(Math.abs(fitWatermarkPx(480, 420, 200) - 52.5) < 1e-9);
+  assert.equal(fitWatermarkPx(480, 2000, 200), 68); // cap
+  assert.equal(fitWatermarkPx(720, 200, 200), 28); // floor for long sub-cent prices
+  assert.equal(fitWatermarkPx(200, 600, 60), 33); // also capped by 55% of pane height
+  assert.equal(fitWatermarkPx(0, 300, 200), 28);
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

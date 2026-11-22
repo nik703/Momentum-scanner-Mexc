@@ -22,12 +22,15 @@ export function SegmentedControl<T extends string>({
   options,
   onChange,
   mono = false,
+  compact = false,
 }: {
   label: string;
   value: T;
   options: readonly SegmentOption<T>[];
   onChange: (v: T) => void;
   mono?: boolean;
+  /** 24px tall (chart toolbars) instead of 28px. */
+  compact?: boolean;
 }) {
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
   const idx = Math.max(0, options.findIndex((o) => o.value === value));
@@ -47,7 +50,10 @@ export function SegmentedControl<T extends string>({
       role="radiogroup"
       aria-label={label}
       onKeyDown={onKeyDown}
-      className="inline-flex h-7 shrink-0 items-stretch overflow-hidden rounded-[3px] border border-line"
+      className={cx(
+        "inline-flex shrink-0 items-stretch overflow-hidden rounded-[3px] border border-line",
+        compact ? "h-6" : "h-7",
+      )}
     >
       {options.map((o, i) => {
         const active = o.value === value;

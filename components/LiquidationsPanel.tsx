@@ -83,7 +83,8 @@ export function LiquidationsPanel({ snap, soundEnabled }: { snap: LiquidationSna
     <section aria-labelledby="liq-title" className="border border-line" data-testid="liquidations">
       <header className="flex h-8 items-center gap-2 border-b border-line px-2 sm:px-3">
         <h3 id="liq-title" className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wider">
-          Liquidations · <span className="num text-fg-2">{snap.base}</span>
+          <span className="sm:hidden">Liqs</span>
+          <span className="hidden sm:inline">Liquidations</span> · <span className="num text-fg-2">{snap.base}</span>
         </h3>
         <div className="flex shrink-0 items-center gap-1" aria-label="Liquidation sound previews">
           <span

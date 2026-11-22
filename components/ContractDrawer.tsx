@@ -239,6 +239,11 @@ function InspectorBody({
     [feed.min1, liqs.window15m.longUsd, liqs.window15m.shortUsd],
   );
 
+  // Same decimals as the price strip, so the watermark matches the headline price exactly.
+  const chartFmt = useMemo(
+    () => makePriceFormatter(feed.ticker?.lastPrice ?? 0, feed.detail?.priceScale ?? null),
+    [feed.ticker?.lastPrice, feed.detail?.priceScale],
+  );
   const liqReady = liqs.status.BN === "open" || liqs.status.BYB === "open" || liqs.status.OKX === "open";
 
   return (
@@ -251,25 +256,21 @@ function InspectorBody({
         <DirectionalBiasBar bias={bias} liqReady={liqReady} />
       </div>
 
-      {/* Chart */}
+      {/* Chart: the toolbar (title, zoom, BG price, 1M/1S) is rendered by MicroChart */}
       <div className="border-b border-line px-2 py-2 sm:px-3">
-        <div className="mb-1 flex items-center justify-between">
-          <span className="text-[10px] font-medium uppercase tracking-wider text-fg-3">
-            {tf === "1M" ? "1-minute · last 60m" : "1-second · last 120s"}
-          </span>
-          <SegmentedControl label="Chart timeframe" value={tf} onChange={setTf} options={CHART_TFS} mono />
-        </div>
-        {feed.status === "loading" && tf === "1M" && feed.min1.length === 0 ? (
-          <div className="flex h-[260px] items-center justify-center text-[11px] text-fg-3" aria-busy="true">
-            Loading {symbol}…
-          </div>
-        ) : (
-          <MicroChart
-            candles={tf === "1M" ? feed.min1 : feed.sec1}
-            timeframe={tf}
-            emptyLabel={tf === "1S" ? "Waiting for trades…" : "No candles"}
-          />
-        )}
+        <MicroChart
+          candles={tf === "1M" ? feed.min1 : feed.sec1}
+          timeframe={tf}
+          title={tf === "1M" ? "1-minute · last 60m" : "1-second · last 120s"}
+          timeframeControl={
+            <SegmentedControl label="Chart timeframe" value={tf} onChange={setTf} options={CHART_TFS} mono compact />
+          }
+          livePrice={feed.ticker?.lastPrice ?? null}
+          formatPrice={chartFmt}
+          emptyLabel={
+            feed.status === "loading" ? `Loading ${symbol}…` : tf === "1S" ? "Waiting for trades…" : "No candles"
+          }
+        />
       </div>
 
       {/* Liquidations */}
