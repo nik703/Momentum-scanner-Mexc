@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useScanner } from "@/hooks/useScanner";
 import { useLeaderboardAlerts } from "@/hooks/useLeaderboardAlerts";
 import { usePersistentState } from "@/hooks/usePersistentState";
-import { playChime, unlockAudio } from "@/lib/audio";
+import { playLeaderboardPing, unlockAudio } from "@/lib/audio";
 import { TIMEFRAMES, type Timeframe } from "@/lib/types";
 import { ContractDrawer } from "./ContractDrawer";
 import { LeaderboardTable, type BoardRow } from "./LeaderboardTable";
@@ -84,7 +84,7 @@ export function Scanner() {
 
   const onTestPing = useCallback(async () => {
     setAudioReady(await unlockAudio());
-    playChime();
+    playLeaderboardPing();
   }, []);
 
   // Keyboard shortcuts: 1/2/3 timeframe, T theme, / focus search, Esc clear search.
@@ -152,6 +152,7 @@ export function Scanner() {
     minVolume: minVol,
     live: snap.status === "CONNECTED",
     pingEnabled: ping === "on",
+    isDrawerOpen: Boolean(inspect),
   });
 
   // Search and row count only change what is shown. Ranks stay the same.
@@ -173,7 +174,7 @@ export function Scanner() {
   const loading = snap.bootstrapAt === null;
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col" data-leaderboard-muted={inspect ? "true" : "false"}>
       <TerminalHeader
         timeframe={tf}
         onTimeframe={setTf}
@@ -234,7 +235,7 @@ export function Scanner() {
       />
 
       {/* Keyed by symbol: switching contracts tears down one feed (sending unsubs) and starts the next. */}
-      {inspect && <ContractDrawer key={inspect} symbol={inspect} onClose={closeDrawer} />}
+      {inspect && <ContractDrawer key={inspect} symbol={inspect} onClose={closeDrawer} soundEnabled={ping === "on"} />}
     </div>
   );
 }

@@ -75,6 +75,22 @@ Each board keeps a `Set<string>` of known Top 15 symbols for the active timefram
 
 While the socket is not `CONNECTED`, the sets keep updating but no sound plays, so a reconnect doesn't cause a burst of chimes. Search and the row-count setting never affect rankings.
 
+**Muted while the drawer is open.** While the Contract Inspection Drawer is open, the Top 10 chime is muted, including a trailing chime already queued in the 1.5s window. Both sets still update on every rank tick, and NEW badges still appear. When you close the drawer, contracts that entered during the inspection don't chime late; only new entries from outside the Top 15 do. The decision logic is in `LeaderboardAlertEngine` in `lib/alerts.ts`.
+
+## Sounds
+
+Every sound is synthesized with Web Audio: sine oscillators with click-free exponential envelopes, no audio files. All of them follow the top bar **Ping** toggle.
+
+| Sound | Contour | When |
+| --- | --- | --- |
+| `playLeaderboardPing()` | 880 → 1320 Hz, upward, 180ms per tone | A contract enters the Top 10 from outside the Top 15 (drawer closed) |
+| `playShortLiqPing()` | 880 → 1245 Hz, ascending, 160ms | A live SHORT liquidation (forced buy, bullish squeeze) for the contract open in the drawer |
+| `playLongLiqPing()` | 740 → 554 Hz, descending, 160ms | A live LONG liquidation (forced sell, bearish flush) for the contract open in the drawer |
+
+- **90ms spacing.** Liquidation pings are spaced at least 90ms apart, so simultaneous fills from Binance, Bybit and OKX play in sequence instead of stacking. During a big cascade, at most about 0.72s of pings is queued and any extra are dropped.
+- **Live events only.** Pings fire only for events the browser receives after the drawer opened. The check uses local receive time, not the exchange's timestamp, because exchange clocks differ from yours: a fill stamped just before you opened the drawer may arrive after it. Switching contracts remounts the drawer, which re-arms this check.
+- **Preview buttons.** The `▼ Long` / `▲ Short` buttons in the drawer's Liquidations header play each ping; clicking one also unlocks browser audio.
+
 ## Theme
 
 Colors are CSS variables switched by `data-theme="dark" | "light"` on `<html>`. Dark is the default. The choice is saved in `localStorage` and applied before first paint. Text uses Geist, and every number uses Geist Mono with `tabular-nums`.

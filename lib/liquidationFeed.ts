@@ -141,6 +141,7 @@ export function bybitTopics(base: string): string[] {
  */
 export class LiquidationFeed {
   private listeners = new Set<() => void>();
+  private eventListeners = new Set<(events: readonly LiqEvent[]) => void>();
   private sockets: ReconnectingSocket[] = [];
   private window: LiqEvent[] = []; // trailing 15m, oldest first
   private tape: LiqEvent[] = []; // newest first, capped
@@ -167,6 +168,17 @@ export class LiquidationFeed {
   };
 
   getSnapshot = (): LiquidationSnapshot => this.snap;
+
+  /**
+   * Called synchronously with each batch of NEW (deduplicated) events as they arrive, without
+   * waiting for the 250ms snapshot flush. Audio pings use this so they stay low-latency.
+   */
+  onEvents = (fn: (events: readonly LiqEvent[]) => void) => {
+    this.eventListeners.add(fn);
+    return () => {
+      this.eventListeners.delete(fn);
+    };
+  };
 
   start(): void {
     if (this.running || !this.base) return;
@@ -259,9 +271,11 @@ export class LiquidationFeed {
   private add(events: LiqEvent[]) {
     if (!events.length) return;
     const cutoff = Date.now() - WINDOW_15M_MS;
+    const fresh: LiqEvent[] = [];
     for (const e of events) {
       if (this.seen.has(e.id)) continue;
       this.seen.add(e.id);
+      fresh.push(e);
       this.session.count++;
       if (e.side === "LONG") this.session.longUsd += e.usd;
       else this.session.shortUsd += e.usd;
@@ -271,7 +285,15 @@ export class LiquidationFeed {
     if (this.tape.length > TAPE_MAX) this.tape.length = TAPE_MAX;
     this.window.sort((a, b) => a.ts - b.ts);
     if (this.seen.size > 5_000) this.seen = new Set(this.tape.map((e) => e.id));
+    if (fresh.length === 0) return;
     this.dirty = true;
+    for (const fn of this.eventListeners) {
+      try {
+        fn(fresh);
+      } catch {
+        /* a listener (e.g. audio) must never break ingestion */
+      }
+    }
   }
 
   /** Drops events older than 15 minutes. Returns whether anything was removed. */

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useContractFeed } from "@/hooks/useContractFeed";
 import { useCrossExchangeLiquidations } from "@/hooks/useCrossExchangeLiquidations";
 import { calculateBiasScore } from "@/lib/biasScore";
@@ -29,9 +29,24 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: str
  * Contract Inspection Drawer: a 520px right slide-over below the top bar on desktop, and a
  * full-screen sheet on mobile. It is not modal: the scanner and its Top 10 alerts keep running.
  */
-export function ContractDrawer({ symbol, onClose }: { symbol: string; onClose: () => void }) {
+export function ContractDrawer({
+  symbol,
+  onClose,
+  soundEnabled,
+}: {
+  symbol: string;
+  onClose: () => void;
+  /** Global Ping: ON / OFF toggle. */
+  soundEnabled: boolean;
+}) {
   const feed = useContractFeed(symbol);
   const closeRef = useRef<HTMLButtonElement>(null);
+  // Liquidation pings only fire for events received after this moment. The drawer is keyed by
+  // symbol, so switching contracts remounts it and re-arms the guard.
+  const drawerOpenedAtRef = useRef(0);
+  useEffect(() => {
+    drawerOpenedAtRef.current = Date.now();
+  }, []);
 
   // Move focus into the drawer on open, and give it back to the trigger on close.
   useEffect(() => {
@@ -94,15 +109,29 @@ export function ContractDrawer({ symbol, onClose }: { symbol: string; onClose: (
           </div>
         ) : (
           // Mounted only for a valid contract, so a 404 never opens liquidation sockets.
-          <InspectorBody symbol={symbol} feed={feed} />
+          <InspectorBody symbol={symbol} feed={feed} soundEnabled={soundEnabled} drawerOpenedAtRef={drawerOpenedAtRef} />
         )}
       </div>
     </aside>
   );
 }
 
-function InspectorBody({ symbol, feed }: { symbol: string; feed: ContractSnapshot }) {
-  const liqs = useCrossExchangeLiquidations(symbol, feed.detail?.baseCoin, feed.status === "ready");
+function InspectorBody({
+  symbol,
+  feed,
+  soundEnabled,
+  drawerOpenedAtRef,
+}: {
+  symbol: string;
+  feed: ContractSnapshot;
+  soundEnabled: boolean;
+  drawerOpenedAtRef: RefObject<number>;
+}) {
+  const liqs = useCrossExchangeLiquidations(symbol, feed.detail?.baseCoin, {
+    enabled: feed.status === "ready",
+    soundEnabled,
+    drawerOpenedAtRef,
+  });
   const [tf, setTf] = useState<ChartTimeframe>("1M");
 
   const bias = useMemo(
@@ -179,7 +208,7 @@ function InspectorBody({ symbol, feed }: { symbol: string; feed: ContractSnapsho
 
       {/* Liquidations */}
       <div className="px-2 py-2 sm:px-3">
-        <LiquidationsPanel snap={liqs} />
+        <LiquidationsPanel snap={liqs} soundEnabled={soundEnabled} />
       </div>
     </>
   );

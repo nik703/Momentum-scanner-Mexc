@@ -30,3 +30,53 @@ export function evaluateTop10Entries(known: Set<string>, ranked: readonly string
   for (const s of top15) known.add(s);
   return entered;
 }
+
+export interface AlertTick {
+  gainers: readonly string[];
+  losers: readonly string[];
+  /** Timeframe + volume filter. A change reseeds both registries silently. */
+  contextKey: string;
+  /** Live socket CONNECTED. */
+  live: boolean;
+  /** Inspection drawer open: registries keep updating, but nothing is audible. */
+  muted: boolean;
+}
+
+export interface AlertDecision {
+  /** Fresh Top 10 entries per board (they get the NEW badge). */
+  gainers: string[];
+  losers: string[];
+  /** True only when there are fresh entries, the feed is live, and alerts are not muted. */
+  audible: boolean;
+  reseeded: boolean;
+}
+
+/**
+ * Framework-free Top 10 / Top 15 alert engine behind useLeaderboardAlerts.
+ *
+ * Muting (drawer open) only suppresses sound. `gainersKnownTop15` / `losersKnownTop15` still
+ * update on every tick, so a contract that entered the Top 10 while the drawer was open is
+ * already known when it closes and never fires a late chime.
+ */
+export class LeaderboardAlertEngine {
+  readonly gainersKnownTop15 = new Set<string>();
+  readonly losersKnownTop15 = new Set<string>();
+  private contextKey: string | null = null;
+
+  tick(t: AlertTick): AlertDecision {
+    if (t.gainers.length === 0 && t.losers.length === 0) {
+      return { gainers: [], losers: [], audible: false, reseeded: false }; // not hydrated yet
+    }
+    if (this.contextKey !== t.contextKey) {
+      this.contextKey = t.contextKey;
+      seedKnownTop15(this.gainersKnownTop15, t.gainers);
+      seedKnownTop15(this.losersKnownTop15, t.losers);
+      return { gainers: [], losers: [], audible: false, reseeded: true };
+    }
+    const g = evaluateTop10Entries(this.gainersKnownTop15, t.gainers);
+    const l = evaluateTop10Entries(this.losersKnownTop15, t.losers);
+    if (!t.live) return { gainers: [], losers: [], audible: false, reseeded: false };
+    const fresh = g.length > 0 || l.length > 0;
+    return { gainers: g, losers: l, audible: fresh && !t.muted, reseeded: false };
+  }
+}

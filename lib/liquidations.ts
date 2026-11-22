@@ -16,8 +16,14 @@ export interface LiqEvent {
   usd: number;
   /** Fill / bankruptcy price. */
   price: number;
-  /** Event time, epoch ms. */
+  /** Event time from the exchange, epoch ms. */
   ts: number;
+  /**
+   * Local clock when this browser received the event. The "live after drawer opened" guard
+   * uses this, not `ts`: exchange timestamps come from the exchange's clock and
+   * a fill that happened 200ms before the drawer opened can still arrive after it.
+   */
+  receivedAt: number;
 }
 
 export const WINDOW_15M_MS = 15 * 60 * 1000;
@@ -67,7 +73,16 @@ export function parseBinanceForceOrder(raw: unknown, base: string): LiqEvent[] {
     const qty = posNum(o.q);
     if (!side || !price || !qty) continue;
     const ts = posNum(o.T) ?? posNum(f.E) ?? Date.now();
-    out.push({ id: `BN:${s}:${ts}:${o.S}:${qty}`, exchange: "BN", side, instrument: s, usd: price * qty, price, ts });
+    out.push({
+      id: `BN:${s}:${ts}:${o.S}:${qty}`,
+      exchange: "BN",
+      side,
+      instrument: s,
+      usd: price * qty,
+      price,
+      ts,
+      receivedAt: Date.now(),
+    });
   }
   return out;
 }
@@ -92,7 +107,16 @@ export function parseBybitLiquidation(raw: unknown, base: string): LiqEvent[] {
     const qty = posNum(d.v);
     if (!side || !price || !qty) continue;
     const ts = posNum(d.T) ?? posNum(msg.ts) ?? Date.now();
-    out.push({ id: `BYB:${s}:${ts}:${d.S}:${qty}`, exchange: "BYB", side, instrument: s, usd: price * qty, price, ts });
+    out.push({
+      id: `BYB:${s}:${ts}:${d.S}:${qty}`,
+      exchange: "BYB",
+      side,
+      instrument: s,
+      usd: price * qty,
+      price,
+      ts,
+      receivedAt: Date.now(),
+    });
   }
   return out;
 }
@@ -159,6 +183,7 @@ export function parseOkxLiquidation(raw: unknown, base: string, ctVals: OkxCtVal
         usd: okxNotionalUsd(sz, px, spec),
         price: px,
         ts,
+        receivedAt: Date.now(),
       });
     }
   }
@@ -186,4 +211,16 @@ export function totalsSince(events: readonly LiqEvent[], since: number): LiqTota
     else shortUsd += e.usd;
   }
   return { longUsd, shortUsd, count };
+}
+
+/**
+ * Sides to sonify for a batch of freshly received events. Only events received at or after
+ * `openedAt` (drawer open, or contract switch, which remounts the drawer) count, and nothing
+ * plays when sound is off. Returns sides in arrival order.
+ */
+export function selectLivePings(events: readonly LiqEvent[], openedAt: number, soundEnabled: boolean): LiqSide[] {
+  if (!soundEnabled || openedAt <= 0) return [];
+  const out: LiqSide[] = [];
+  for (const e of events) if (e.receivedAt >= openedAt) out.push(e.side);
+  return out;
 }

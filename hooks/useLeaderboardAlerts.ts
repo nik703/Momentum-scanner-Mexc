@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { evaluateTop10Entries, seedKnownTop15 } from "@/lib/alerts";
-import { playChime } from "@/lib/audio";
+import { LeaderboardAlertEngine } from "@/lib/alerts";
+import { playLeaderboardPing } from "@/lib/audio";
 import type { Timeframe } from "@/lib/types";
 
 /** How long the NEW badge stays on a row. */
@@ -21,6 +21,8 @@ interface Options {
   /** Live socket is CONNECTED. Rankings keep updating silently while it is not. */
   live: boolean;
   pingEnabled: boolean;
+  /** Contract Inspection Drawer is open: leaderboard sounds are muted, tracking continues. */
+  isDrawerOpen: boolean;
 }
 
 export interface LeaderboardAlerts {
@@ -32,29 +34,37 @@ export interface LeaderboardAlerts {
 const EMPTY: LeaderboardAlerts = { gainersNew: new Map(), losersNew: new Map() };
 
 /**
- * Top 10 entry alerts with Top 15 hysteresis (see lib/alerts.ts).
+ * Top 10 entry alerts with Top 15 hysteresis (engine: LeaderboardAlertEngine in lib/alerts.ts).
  *
- * - Silent seeding: on first hydration and whenever the timeframe or 24h
- *   volume filter changes, both registries are reset to the current Ranks 1–15
- *   with no sound.
- * - Live evaluation: a symbol in Ranks 1–10 that is not in its board's
- *   registry gets a 15s NEW badge and a chime. Chimes are coalesced: one plays
- *   right away, and entries during the next 1.5s share one trailing chime.
- * - Hysteresis eviction: symbols leave a registry only after their rank goes
- *   above 15 or they are filtered out.
+ * - Silent seeding: on first hydration and whenever the timeframe or 24h volume filter changes,
+ *   `gainersKnownTop15` / `losersKnownTop15` are reset to the current Ranks 1–15 with no sound.
+ * - Live evaluation: a symbol in Ranks 1–10 that is not in its board's registry gets a 15s
+ *   NEW badge and a chime. One chime plays right away; entries during the next 1.5s share one
+ *   trailing chime.
+ * - Drawer mute: while `isDrawerOpen`, no leaderboard chime plays (including a pending
+ *   trailing one), but both registries keep updating on every tick. Closing the drawer
+ *   therefore never replays entries that happened while it was open.
+ * - Hysteresis eviction: symbols leave a registry only after their rank goes above 15 or they
+ *   are filtered out.
  */
 export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
-  const gainersKnownTop15 = useRef(new Set<string>());
-  const losersKnownTop15 = useRef(new Set<string>());
-  const contextKey = useRef<string | null>(null);
+  const engine = useRef<LeaderboardAlertEngine | null>(null);
   const lastChimeAt = useRef(0);
   const pendingChime = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pingEnabled = useRef(o.pingEnabled);
+  const muted = useRef(o.isDrawerOpen);
   const [state, setState] = useState<LeaderboardAlerts>(EMPTY);
 
+  // Declared before the evaluation effect, so a commit that opens the drawer updates the
+  // mute flag before that same commit's rank tick is evaluated.
   useEffect(() => {
     pingEnabled.current = o.pingEnabled;
-  }, [o.pingEnabled]);
+    muted.current = o.isDrawerOpen;
+    if (o.isDrawerOpen && pendingChime.current) {
+      clearTimeout(pendingChime.current);
+      pendingChime.current = null;
+    }
+  }, [o.pingEnabled, o.isDrawerOpen]);
 
   useEffect(
     () => () => {
@@ -64,37 +74,37 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
   );
 
   useEffect(() => {
-    if (o.gainers.length === 0 && o.losers.length === 0) return; // not hydrated yet
-
-    const key = `${o.timeframe}|${o.minVolume}`;
-    if (contextKey.current !== key) {
-      contextKey.current = key;
-      seedKnownTop15(gainersKnownTop15.current, o.gainers);
-      seedKnownTop15(losersKnownTop15.current, o.losers);
+    engine.current ??= new LeaderboardAlertEngine();
+    const d = engine.current.tick({
+      gainers: o.gainers,
+      losers: o.losers,
+      contextKey: `${o.timeframe}|${o.minVolume}`,
+      live: o.live,
+      muted: muted.current,
+    });
+    if (d.reseeded) {
       setState(EMPTY);
       return;
     }
-
-    const g = evaluateTop10Entries(gainersKnownTop15.current, o.gainers);
-    const l = evaluateTop10Entries(losersKnownTop15.current, o.losers);
-    if (!o.live || (g.length === 0 && l.length === 0)) return;
+    if (d.gainers.length === 0 && d.losers.length === 0) return;
 
     const now = Date.now();
     setState((s) => ({
-      gainersNew: withBadges(s.gainersNew, g, now),
-      losersNew: withBadges(s.losersNew, l, now),
+      gainersNew: withBadges(s.gainersNew, d.gainers, now),
+      losersNew: withBadges(s.losersNew, d.losers, now),
     }));
 
-    if (!pingEnabled.current) return;
+    if (!d.audible || !pingEnabled.current) return;
     const since = now - lastChimeAt.current;
     if (since >= CHIME_COOLDOWN_MS) {
       lastChimeAt.current = now;
-      playChime();
+      playLeaderboardPing();
     } else if (!pendingChime.current) {
       pendingChime.current = setTimeout(() => {
         pendingChime.current = null;
+        if (!pingEnabled.current || muted.current) return; // drawer may have opened meanwhile
         lastChimeAt.current = Date.now();
-        if (pingEnabled.current) playChime();
+        playLeaderboardPing();
       }, CHIME_COOLDOWN_MS - since);
     }
   }, [o.gainers, o.losers, o.timeframe, o.minVolume, o.live]);

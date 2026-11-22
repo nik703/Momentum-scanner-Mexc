@@ -5,6 +5,8 @@
  * Not imported by the app, so it never ends up in the client bundle.
  */
 import assert from "node:assert/strict";
+import { LeaderboardAlertEngine } from "../lib/alerts.ts";
+import { nextPingSlot } from "../lib/audio.ts";
 import { calculateBiasScore, type BiasResult } from "../lib/biasScore.ts";
 import { mergeMin1, parseDealPush, parseKlinePush, SecondCandleBuilder } from "../lib/candles.ts";
 import {
@@ -14,7 +16,9 @@ import {
   parseBybitLiquidation,
   parseOkxInstruments,
   parseOkxLiquidation,
+  selectLivePings,
   totalsSince,
+  type LiqEvent,
 } from "../lib/liquidations.ts";
 import { baseAsset, normalizeSymbol } from "../lib/symbol.ts";
 import type { Candle } from "../lib/types.ts";
@@ -311,6 +315,114 @@ check("push.deal -> 1-second OHLCV buckets with turnover and flat padding", () =
   assert.equal(s[3].o, 101);
   b.advance(base + 200_000);
   assert.equal(b.series.length, 120); // retains last 120s
+});
+
+/* ------------------------------------------------------------------ */
+console.log("\n[5] Drawer-aware audio alerts");
+
+const board = (n: number) => Array.from({ length: n }, (_, i) => `C${String(i + 1).padStart(2, "0")}_USDT`); // C01 = rank 1
+const move = (arr: readonly string[], sym: string, rank: number) => {
+  const rest = arr.filter((x) => x !== sym);
+  rest.splice(rank - 1, 0, sym);
+  return rest;
+};
+const ctxKey = "15M|0";
+
+check("drawer open: Rank 20 -> Rank 5 is silent, but knownTop15 updates", () => {
+  const eng = new LeaderboardAlertEngine();
+  let g = board(30);
+  const l = board(30).map((x) => x.replace("C", "L"));
+  assert.equal(eng.tick({ gainers: g, losers: l, contextKey: ctxKey, live: true, muted: false }).reseeded, true);
+  assert.equal(eng.gainersKnownTop15.has("C20_USDT"), false);
+
+  g = move(g, "C20_USDT", 5);
+  const d = eng.tick({ gainers: g, losers: l, contextKey: ctxKey, live: true, muted: true });
+  assert.deepEqual(d.gainers, ["C20_USDT"], "entry is still detected (NEW badge)");
+  assert.equal(d.audible, false, "muted: no leaderboard ping");
+  assert.equal(eng.gainersKnownTop15.has("C20_USDT"), true, "registry synced silently");
+});
+
+check("drawer closed afterwards: no delayed burst; new outside entries ping again", () => {
+  const eng = new LeaderboardAlertEngine();
+  let g = board(30);
+  const l: string[] = [];
+  eng.tick({ gainers: g, losers: l, contextKey: ctxKey, live: true, muted: false });
+  // drawer open: two contracts enter, ticks keep flowing
+  g = move(g, "C20_USDT", 5);
+  eng.tick({ gainers: g, losers: l, contextKey: ctxKey, live: true, muted: true });
+  g = move(g, "C25_USDT", 2);
+  eng.tick({ gainers: g, losers: l, contextKey: ctxKey, live: true, muted: true });
+  // drawer closes: the next tick (same ranks) must not replay those entries
+  const after = eng.tick({ gainers: g, losers: l, contextKey: ctxKey, live: true, muted: false });
+  assert.deepEqual([after.gainers, after.audible], [[], false]);
+  // a genuinely new entry from outside the Top 15 pings again
+  g = move(g, "C28_USDT", 7);
+  const fresh = eng.tick({ gainers: g, losers: l, contextKey: ctxKey, live: true, muted: false });
+  assert.deepEqual([fresh.gainers, fresh.audible], [["C28_USDT"], true]);
+});
+
+check("muted entries from ranks 11-15 stay silent after close (hysteresis intact)", () => {
+  const eng = new LeaderboardAlertEngine();
+  let g = board(30);
+  eng.tick({ gainers: g, losers: [], contextKey: ctxKey, live: true, muted: false });
+  g = move(g, "C13_USDT", 3);
+  assert.equal(eng.tick({ gainers: g, losers: [], contextKey: ctxKey, live: true, muted: true }).gainers.length, 0);
+  g = move(g, "C13_USDT", 12);
+  g = move(g, "C13_USDT", 4);
+  assert.equal(eng.tick({ gainers: g, losers: [], contextKey: ctxKey, live: true, muted: false }).audible, false);
+});
+
+const liq = (side: "LONG" | "SHORT", receivedAt: number): LiqEvent => ({
+  id: `${side}${receivedAt}`,
+  exchange: "BYB",
+  side,
+  instrument: "SOLUSDT",
+  usd: 1000,
+  price: 70,
+  ts: receivedAt - 150, // exchange clock is slightly behind receipt, as in real life
+  receivedAt,
+});
+
+check("live LONG LIQ -> long ping, live SHORT LIQ -> short ping (in arrival order)", () => {
+  const openedAt = 1_000_000;
+  assert.deepEqual(selectLivePings([liq("LONG", openedAt + 5), liq("SHORT", openedAt + 9)], openedAt, true), ["LONG", "SHORT"]);
+});
+
+check("mount guard: events received before drawer open never ping", () => {
+  const openedAt = 1_000_000;
+  assert.deepEqual(selectLivePings([liq("LONG", openedAt - 1), liq("SHORT", openedAt)], openedAt, true), ["SHORT"]);
+  // a fill stamped 150ms before open by the exchange but received after open IS live
+  assert.deepEqual(selectLivePings([liq("LONG", openedAt + 10)], openedAt, true), ["LONG"]);
+});
+
+check("master Ping OFF / unarmed guard: nothing plays", () => {
+  assert.deepEqual(selectLivePings([liq("LONG", 5)], 1, false), []);
+  assert.deepEqual(selectLivePings([liq("LONG", 5)], 0, true), []);
+});
+
+check("90ms cadence limiter spaces a 3-exchange burst and caps backlog", () => {
+  let free = 0;
+  const at: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const slot = nextPingSlot(10, free);
+    assert.ok(slot);
+    at.push(slot.at);
+    free = slot.nextFree;
+  }
+  assert.deepEqual(at.map((x) => Number((x - 10).toFixed(3))), [0, 0.09, 0.18]);
+  // a 20-fill cascade: no more than ~0.72s of backlog is queued; the rest is dropped
+  let played = 0;
+  free = 0;
+  for (let i = 0; i < 20; i++) {
+    const slot = nextPingSlot(20, free);
+    if (slot) {
+      played++;
+      free = slot.nextFree;
+    }
+  }
+  assert.equal(played, 9);
+  // once the clock moves past the backlog, pings flow again immediately
+  assert.deepEqual(nextPingSlot(25, free), { at: 25, nextFree: 25.09 });
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
