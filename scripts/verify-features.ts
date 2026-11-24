@@ -30,6 +30,7 @@ import {
   TradeCandleBuilder,
 } from "../lib/candles.ts";
 import { normalizeDeals } from "../lib/mexc.ts";
+import { bucketLiquidations, liqBarLayout, TF_BUCKET_MS } from "../lib/liqBuckets.ts";
 import { binanceStreams, binanceUrl, bybitTopic, okxInstIds } from "../lib/liquidationFeed.ts";
 import { diffChannels, focusChannels, tickersChannels } from "../lib/mexcSocket.ts";
 import {
@@ -643,6 +644,57 @@ check("Binance combined-stream frames are unwrapped", () => {
   const [e] = parseBinanceForceOrder(JSON.stringify(wrapped), "SOL");
   assert.equal(e.side, "LONG");
   assert.equal(e.usd, 140);
+});
+
+/* ------------------------------------------------------------------ */
+console.log("\n[8] Chart liquidation overlay: bucketing + geometry");
+
+const at = (hh: number, mm: number, ss: number) => Date.UTC(2026, 10, 24, hh, mm, ss);
+const ev = (id: string, side: "LONG" | "SHORT", usd: number, ts: number): LiqEvent => ({
+  id, exchange: "BN", side, instrument: "BTCUSDT", usd, price: 60_000, ts, receivedAt: ts,
+});
+const liqSample = [
+  ev("a", "LONG", 1000, at(13, 56, 12)),
+  ev("b", "SHORT", 400, at(13, 56, 48)),
+  ev("c", "LONG", 250, at(13, 56, 48) + 700),
+  ev("d", "SHORT", 90, at(13, 57, 3)),
+  ev("a", "LONG", 1000, at(13, 56, 12)), // duplicate (window ∩ tape) must not double count
+];
+
+check("1M: 13:56:12 + 13:56:48 land in the 13:56 bucket, split by side, deduped", () => {
+  const m = bucketLiquidations(liqSample, TF_BUCKET_MS["1M"]);
+  assert.deepEqual(m.get(at(13, 56, 0)), { longUsd: 1250, shortUsd: 400 });
+  assert.deepEqual(m.get(at(13, 57, 0)), { longUsd: 0, shortUsd: 90 });
+  assert.equal(m.size, 2);
+});
+
+check("10S: separate 13:56:10 / 13:56:40 / 13:57:00 buckets", () => {
+  const m = bucketLiquidations(liqSample, TF_BUCKET_MS["10S"]);
+  assert.deepEqual(m.get(at(13, 56, 10)), { longUsd: 1000, shortUsd: 0 });
+  assert.deepEqual(m.get(at(13, 56, 40)), { longUsd: 250, shortUsd: 400 });
+  assert.deepEqual(m.get(at(13, 57, 0)), { longUsd: 0, shortUsd: 90 });
+  assert.equal(m.size, 3);
+});
+
+check("1S: each second is its own bucket (13:56:48 holds the short; +700ms long is 13:56:48 too)", () => {
+  const m = bucketLiquidations(liqSample, TF_BUCKET_MS["1S"]);
+  assert.deepEqual(m.get(at(13, 56, 12)), { longUsd: 1000, shortUsd: 0 });
+  assert.deepEqual(m.get(at(13, 56, 48)), { longUsd: 250, shortUsd: 400 });
+  assert.deepEqual(m.get(at(13, 57, 3)), { longUsd: 0, shortUsd: 90 });
+});
+
+check("overlay geometry: single centered thin bar / dual side-by-side bars, 3px min, clamped", () => {
+  const one = liqBarLayout({ longUsd: 1000, shortUsd: 0 }, 100, 10, 5_000_000, 40);
+  assert.equal(one.length, 1);
+  assert.equal(one[0].w, 3); // max(2, floor(10 × 0.32))
+  assert.equal(one[0].x + one[0].w / 2, 100); // centered
+  assert.equal(one[0].h, 3); // $1000 vs $5M volume -> min 3px
+  const two = liqBarLayout({ longUsd: 9e9, shortUsd: 1 }, 50, 20, 1_000, 40);
+  assert.deepEqual(two.map((b) => [b.side, b.w]), [["LONG", 5], ["SHORT", 5]]); // floor(20 × 0.26) = 5
+  assert.equal(two[1].x - (two[0].x + two[0].w), 1); // 1px gap
+  assert.equal((two[0].x + two[1].x + two[1].w) / 2, 50); // pair centered
+  assert.equal(two[0].h, 40); // clamped to the volume zone
+  assert.deepEqual(liqBarLayout({ longUsd: 0, shortUsd: 0 }, 0, 10, 1, 40), []);
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

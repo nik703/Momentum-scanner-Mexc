@@ -149,6 +149,31 @@ Where this deliberately differs from the original spec, following exchange docum
 - **Binance silence warning.** Binance blocks some regions, including the US (HTTP 451). There the socket still opens but sends nothing, so 120s of silence turns the BN dot red with an explanatory tooltip.
 - **No sockets for unknown contracts.** A 404 contract never opens liquidation sockets, and its MEXC socket is closed as soon as the 404 arrives.
 
+## Settings (⚙)
+
+All toggles live in a top-right cog: a 28px button that opens a 240px panel. Click outside to close it. **Escape closes the panel first**: it is caught in the capture phase, so it never also closes the drawer. A second Escape closes the drawer.
+
+| Main page cog | Drawer cog (next to ×) |
+| --- | --- |
+| Theme (Dark / Light, `T`) | Theme (shared with the main page) |
+| Top 10 entry ping + `Test` (`mx-ping`) | Liquidation audio pings + `▼ Long` / `▲ Short` previews (`mexc_liq_ping`, default off) |
+| Leaderboard depth: Top 25 / 50 / All (`mx-limit`) | Chart liquidation overlay (`mexc_chart_liq_overlay`, default on) |
+| | Candle smoothing (`mexc_chart_smooth`, default on) |
+| | Background price (`mexc_chart_bg_price`, default on) |
+
+The header keeps only the live filters (timeframe, 24h volume, search). The chart toolbar keeps only zoom and `1M | 10S | 1S`, which fits on one line at 375px.
+
+### Chart liquidation overlay
+
+Liquidations from Binance, Bybit and OKX, both from the rolling 15-minute window and from this session, are summed per candle in the chart's own buckets: `floor(ts / 60000)` on 1M, `/ 10000` on 10S, `/ 1000` on 1S. They are drawn on the canvas:
+
+- **Volume bars** use a neutral fill: `max(4, floor(slot × 0.74))` wide, never wider than the candle slot.
+- **Liquidation bars** are drawn on top of them and are thinner. A candle with only longs or only shorts gets one centred bar, `max(2, floor(volW × 0.32))` wide. A candle with both gets two bars side by side, each `max(2, floor(volW × 0.26))` wide with a 1px gap.
+- **Colours:** purple is long positions liquidated (`#A855F7` dark / `#9333EA` light), yellow is short positions liquidated (`#FACC15` / `#CA8A04`).
+- **Height** is scaled against the visible USD volume (minimum 3px), so a bar never reaches into the candle area.
+
+A legend pill appears in the chart corner, and the OHLCV readout adds `L-Liq` / `S-Liq` for any bar that has liquidations.
+
 ## Keyboard shortcuts
 
 `1` `2` `3` switch the timeframe · `T` toggles the theme · `/` focuses search · `Enter` opens the highlighted contract · `Esc` closes the lookup list, then clears search, then closes the drawer

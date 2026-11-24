@@ -22,6 +22,10 @@
   --alert: #f59e0b;
   --alert-tint: #f59e0b1f;
   --ring: #8b949e;
+  /* Chart: neutral volume fill + liquidation overlay (longs liquidated = purple, shorts = yellow) */
+  --vol-fill: rgba(148, 163, 184, 0.24);
+  --liq-long: #a855f7;
+  --liq-short: #facc15;
   color-scheme: dark;
 }
 
@@ -41,6 +45,9 @@
   --alert: #b45309;
   --alert-tint: #b4530914;
   --ring: #475569;
+  --vol-fill: rgba(100, 116, 139, 0.22);
+  --liq-long: #9333ea;
+  --liq-short: #ca8a04;
   color-scheme: light;
 }
 
@@ -59,6 +66,8 @@
   --color-loss-tint: var(--loss-tint);
   --color-alert: var(--alert);
   --color-alert-tint: var(--alert-tint);
+  --color-liq-long: var(--liq-long);
+  --color-liq-short: var(--liq-short);
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }

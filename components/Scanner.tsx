@@ -202,7 +202,7 @@ export function Scanner() {
         query={query}
         onQuery={setQuery}
         theme={theme}
-        onToggleTheme={toggleTheme}
+        onTheme={setTheme}
         pingOn={ping === "on"}
         onPing={onPing}
         onTestPing={onTestPing}
@@ -256,7 +256,7 @@ export function Scanner() {
       />
 
       {/* Keyed by symbol: switching contracts tears down one feed (sending unsubs) and starts the next. */}
-      {inspect && <ContractDrawer key={inspect} symbol={inspect} onClose={closeDrawer} soundEnabled={ping === "on"} />}
+      {inspect && <ContractDrawer key={inspect} symbol={inspect} onClose={closeDrawer} />}
     </div>
   );
 }

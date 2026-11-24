@@ -1,7 +1,6 @@
 "use client";
 
 import { memo } from "react";
-import { playLongLiqPing, playShortLiqPing, unlockAudio } from "@/lib/audio";
 import { fmtPrice, fmtUsd } from "@/lib/format";
 import { EXCHANGES, type LiquidationSnapshot } from "@/lib/liquidationFeed";
 import type { LiqEvent } from "@/lib/liquidations";
@@ -49,32 +48,7 @@ const TapeRow = memo(function TapeRow({ e }: { e: LiqEvent }) {
   );
 });
 
-/** Compact audition button. It also unlocks the AudioContext, since a click counts as a user gesture. */
-function PreviewButton({ side }: { side: "LONG" | "SHORT" }) {
-  const long = side === "LONG";
-  return (
-    <button
-      type="button"
-      data-testid={long ? "preview-long-ping" : "preview-short-ping"}
-      onClick={async () => {
-        await unlockAudio();
-        if (long) playLongLiqPing();
-        else playShortLiqPing();
-      }}
-      title={long ? "Preview LONG LIQ ping (descending 740 -> 554 Hz)" : "Preview SHORT LIQ ping (ascending 880 -> 1245 Hz)"}
-      aria-label={long ? "Preview long liquidation ping" : "Preview short liquidation ping"}
-      className={cx(
-        "num inline-flex h-5 items-center gap-0.5 rounded-[2px] border border-line px-1 text-[9.5px] font-semibold uppercase hover:bg-row-hover",
-        long ? "text-loss" : "text-gain",
-      )}
-    >
-      <span aria-hidden>{long ? "▼" : "▲"}</span>
-      {long ? "Long" : "Short"}
-    </button>
-  );
-}
-
-export function LiquidationsPanel({ snap, soundEnabled }: { snap: LiquidationSnapshot; soundEnabled: boolean }) {
+export function LiquidationsPanel({ snap }: { snap: LiquidationSnapshot }) {
   const { window15m: w } = snap;
   const total = w.longUsd + w.shortUsd;
   const longShare = total > 0 ? (w.longUsd / total) * 100 : 50;
@@ -86,17 +60,6 @@ export function LiquidationsPanel({ snap, soundEnabled }: { snap: LiquidationSna
           <span className="sm:hidden">Liqs</span>
           <span className="hidden sm:inline">Liquidations</span> · <span className="num text-fg-2">{snap.base}</span>
         </h3>
-        <div className="flex shrink-0 items-center gap-1" aria-label="Liquidation sound previews">
-          <span
-            className={cx("num mr-0.5 text-[9.5px] uppercase", soundEnabled ? "text-fg-2" : "text-fg-3")}
-            title={soundEnabled ? "Live liquidation pings are ON" : "Live liquidation pings are OFF (top bar Ping toggle)"}
-          >
-            {soundEnabled ? "♪ on" : "♪ off"}
-          </span>
-          <PreviewButton side="LONG" />
-          <PreviewButton side="SHORT" />
-        </div>
-        <span aria-hidden className="h-4 w-px shrink-0 bg-line" />
         <div className="flex shrink-0 items-center gap-2" aria-label="Exchange connection status">
           {EXCHANGES.map((ex) => (
             <span key={ex} className="num flex items-center gap-1 text-[10px] text-fg-2" title={snap.notes[ex] ?? `${ex}: ${snap.status[ex]}`}>

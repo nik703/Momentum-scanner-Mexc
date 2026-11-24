@@ -39,6 +39,8 @@ export interface LiquidationSnapshot {
   tape: readonly LiqEvent[];
   /** Rolling trailing-15-minute totals. */
   window15m: LiqTotals;
+  /** Rolling trailing-15-minute events, oldest first (chart overlay). */
+  windowEvents: readonly LiqEvent[];
   /** Totals since the drawer opened. */
   session: LiqTotals;
 }
@@ -295,6 +297,7 @@ export class LiquidationFeed {
       notes: this.notes,
       tape: this.tape.slice(),
       window15m: totalsSince(this.window, Date.now() - WINDOW_15M_MS),
+      windowEvents: this.window.slice(),
       session: { ...this.session },
     };
   }

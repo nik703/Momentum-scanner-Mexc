@@ -10,7 +10,6 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { usePersistentState } from "@/hooks/usePersistentState";
 import {
   DEFAULT_BARS,
   RIGHT_MARGIN_PX,
@@ -25,6 +24,8 @@ import {
   zoomBars,
 } from "@/lib/chartViewport";
 import { buildDisplayCandles } from "@/lib/candles";
+import { bucketLiquidations, liqBarLayout, TF_BUCKET_MS } from "@/lib/liqBuckets";
+import type { LiqEvent } from "@/lib/liquidations";
 import { fmtPrice, fmtUsd } from "@/lib/format";
 import type { Candle } from "@/lib/types";
 import { cx } from "./ui/primitives";
@@ -39,9 +40,6 @@ const VOL_SHARE = 0.22; // share of plot height used by the volume histogram
 const GAP = 6; // gap between price and volume panes
 const ZOOM_STEP = 1.25; // per +/- click
 const DRAG_THRESHOLD_PX = 3;
-const BG_PRICE_KEY = "mexc_chart_bg_price";
-const BG_VALUES = ["true", "false"] as const;
-const SMOOTH_KEY = "mexc_chart_smooth";
 /** Minimum rendered body height (CSS px): Smooth keeps single-trade buckets legible. */
 const MIN_BODY_RAW = 1;
 const MIN_BODY_SMOOTH = 3;
@@ -57,6 +55,9 @@ interface Palette {
   loss: string;
   mono: string;
   watermark: string;
+  volFill: string;
+  liqLong: string;
+  liqShort: string;
 }
 
 /**
@@ -78,6 +79,9 @@ function readPalette(el: Element): Palette {
     loss: v("--loss", "#ef4444"),
     mono: `${geistMono ? `${geistMono}, ` : ""}ui-monospace, SFMono-Regular, Menlo, monospace`,
     watermark: document.documentElement.dataset.theme === "light" ? WATERMARK.light : WATERMARK.dark,
+    volFill: v("--vol-fill", "rgba(148, 163, 184, 0.24)"),
+    liqLong: v("--liq-long", "#a855f7"),
+    liqShort: v("--liq-short", "#facc15"),
   };
 }
 
@@ -161,6 +165,10 @@ export function MicroChart({
   timeframeControl,
   livePrice,
   formatPrice = fmtPrice,
+  bgPrice = true,
+  smooth = true,
+  liqOverlay = false,
+  liquidations,
 }: {
   candles: readonly Candle[];
   timeframe: ChartTimeframe;
@@ -174,6 +182,14 @@ export function MicroChart({
   livePrice?: number | null;
   /** Shared price formatter (same decimals as the drawer's price strip). */
   formatPrice?: (p: number) => string;
+  /** Background price watermark (setting lives in the drawer's cog). */
+  bgPrice?: boolean;
+  /** Smooth candles on 10S/1S (setting lives in the drawer's cog). */
+  smooth?: boolean;
+  /** Draw liquidation bars over the volume bars (setting lives in the drawer's cog). */
+  liqOverlay?: boolean;
+  /** Cross-exchange liquidation events for this coin (rolling window + session tape; duplicates are fine). */
+  liquidations?: readonly LiqEvent[];
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -191,14 +207,15 @@ export function MicroChart({
     "10S": { bars: DEFAULT_BARS, anchorT: null },
     "1S": { bars: DEFAULT_BARS, anchorT: null },
   });
-  const [bgPref, setBgPref] = usePersistentState(BG_PRICE_KEY, "true", BG_VALUES);
-  const bgPrice = bgPref === "true";
-  const [smoothPref, setSmoothPref] = usePersistentState(SMOOTH_KEY, "true", BG_VALUES);
-  const smooth = smoothPref === "true";
   // Smoothing targets the fast trade-built charts. 1M candles are exchange OHLC and stay raw.
   const smoothActive = smooth && timeframe !== "1M";
   // What gets DRAWN. Prices, the live line, axis tags and the crosshair readout stay on raw `candles`.
   const display = useMemo(() => buildDisplayCandles(candles, smoothActive), [candles, smoothActive]);
+  // Liquidations summed per candle bucket, using the same floor as this timeframe's candles.
+  const liqByBucket = useMemo(
+    () => (liqOverlay && liquidations?.length ? bucketLiquidations(liquidations, TF_BUCKET_MS[timeframe]) : null),
+    [liqOverlay, liquidations, timeframe],
+  );
 
   // ---- derived viewport (render scope: plain values, no refs) ----
   const capacity = capacityFor(timeframe);
@@ -345,21 +362,50 @@ export function MicroChart({
       canvas.dataset.bgTextWidth = "0";
     }
 
-    // 4) Volume histogram, then 5) wicks and bodies (from the display pipeline)
+    // 4) Volume histogram in a neutral theme fill, then 4b) the liquidation overlay on top of it,
+    //    then 5) wicks and bodies (from the display pipeline)
     const bodyW = vp.bodyW;
     const minBody = smoothActive ? MIN_BODY_SMOOTH : MIN_BODY_RAW;
+    // max(4, floor(slot × 0.74)), but never wider than the slot itself, so bars never merge when zoomed out
+    const volW = Math.min(Math.max(4, Math.floor(vp.slotW * 0.74)), Math.max(1, Math.floor(vp.slotW)));
+    const zoneH = volH - 2;
+    ctx.fillStyle = pal.volFill;
     for (let i = vp.start; i < vp.end; i++) {
       const c = candles[i];
-      const d = display[i];
       const vv = useTurnover ? c.a : c.v;
       if (vmax > 0 && vv > 0) {
-        const vh = Math.max(1 / dpr, (vv / vmax) * (volH - 2));
-        ctx.fillStyle = d.c >= d.o ? pal.gain : pal.loss;
-        ctx.globalAlpha = 0.45;
-        ctx.fillRect(snap(candleX(vp, i) - bodyW / 2, dpr), plotH - vh, bodyW, vh);
+        const vh = Math.max(1 / dpr, (vv / vmax) * zoneH);
+        ctx.fillRect(snap(candleX(vp, i) - volW / 2, dpr), plotH - vh, volW, vh);
       }
     }
-    ctx.globalAlpha = 1;
+    let liqBars = 0;
+    let liqDual = 0;
+    if (liqByBucket) {
+      // Scale against the visible USD volume when volume is turnover. With contract-only volume
+      // (contract size unknown), use the largest visible liquidation so the bars stay comparable.
+      let liqMax = 0;
+      if (!useTurnover) {
+        for (let i = vp.start; i < vp.end; i++) {
+          const b = liqByBucket.get(candles[i].t);
+          if (b) liqMax = Math.max(liqMax, b.longUsd, b.shortUsd);
+        }
+      }
+      const scaleMax = useTurnover ? vmax : liqMax;
+      for (let i = vp.start; i < vp.end; i++) {
+        const b = liqByBucket.get(candles[i].t);
+        if (!b) continue;
+        const bars = liqBarLayout(b, candleX(vp, i), volW, scaleMax, zoneH);
+        if (bars.length === 2) liqDual++;
+        for (const bar of bars) {
+          ctx.fillStyle = bar.side === "LONG" ? pal.liqLong : pal.liqShort;
+          ctx.fillRect(snap(bar.x, dpr), snap(plotH - bar.h, dpr), bar.w, snap(bar.h, dpr));
+          liqBars++;
+        }
+      }
+    }
+    canvas.dataset.volWidth = String(volW);
+    canvas.dataset.liqBars = String(liqBars);
+    canvas.dataset.liqDual = String(liqDual);
     for (let i = vp.start; i < vp.end; i++) {
       const raw = candles[i];
       const d = display[i];
@@ -454,7 +500,7 @@ export function MicroChart({
         }
       }
     }
-  }, [candles, display, smoothActive, n, timeframe, emptyLabel, visibleBars, rightOffset, watermarkText, formatPrice, axisW]);
+  }, [candles, display, smoothActive, liqByBucket, n, timeframe, emptyLabel, visibleBars, rightOffset, watermarkText, formatPrice, axisW]);
 
   // The latest draw lives in a ref so `schedule` stays stable; resize/observer effects don't re-run on ticks.
   const drawRef = useRef(draw);
@@ -644,13 +690,14 @@ export function MicroChart({
 
   const shown = (hoverIdx !== null ? candles[hoverIdx] : undefined) ?? candles[n - 1] ?? null;
   const up = shown ? shown.c >= shown.o : true;
+  const shownLiq = shown && liqByBucket ? liqByBucket.get(shown.t) : undefined;
 
   return (
     <div className="min-w-0">
-      {/* Toolbar: title on the left; zoom, BG price and 1M/1S on the right. Wraps on narrow phones. */}
-      <div className="mb-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5" data-testid="chart-toolbar">
-        <span className="whitespace-nowrap text-[10px] font-medium uppercase tracking-wider text-fg-3">{title}</span>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+      {/* Toolbar: title, zoom and timeframe only (display settings live in the drawer's cog). One line even at 375px. */}
+      <div className="mb-1 flex flex-nowrap items-center justify-between gap-x-2" data-testid="chart-toolbar">
+        <span className="min-w-0 truncate whitespace-nowrap text-[10px] font-medium uppercase tracking-wider text-fg-3">{title}</span>
+        <div className="flex shrink-0 items-center gap-1">
           <div className="inline-flex items-stretch overflow-hidden rounded-[3px] border border-line" role="group" aria-label="Chart zoom">
             <ToolButton label="Zoom out" testId="zoom-out" onClick={() => zoomBy(ZOOM_STEP)} disabled={visibleBars >= capacity}>
               −
@@ -660,33 +707,6 @@ export function MicroChart({
             </ToolButton>
             <ToolButton label="Reset zoom to 100% and follow live" testId="zoom-reset" onClick={resetZoom} active={zoomPct !== 100}>
               <span className="w-[4ch] text-center">{zoomPct}%</span>
-            </ToolButton>
-          </div>
-          <div className="inline-flex items-stretch overflow-hidden rounded-[3px] border border-line">
-            <ToolButton
-              label={`Background price ${bgPrice ? "on" : "off"}`}
-              testId="bg-price-toggle"
-              onClick={() => setBgPref(bgPrice ? "false" : "true")}
-              active={bgPrice}
-            >
-              <span className="uppercase">
-                BG <span className={bgPrice ? "text-fg" : "text-fg-3"}>{bgPrice ? "ON" : "OFF"}</span>
-              </span>
-            </ToolButton>
-            <ToolButton
-              label={
-                timeframe === "1M"
-                  ? "Smooth applies to the 10S and 1S charts"
-                  : `Smooth candles ${smooth ? "on" : "off"} (gap-free Heikin-Ashi; prices stay exact)`
-              }
-              testId="smooth-toggle"
-              onClick={() => setSmoothPref(smooth ? "false" : "true")}
-              active={smoothActive}
-              disabled={timeframe === "1M"}
-            >
-              <span className="uppercase">
-                Smooth <span className={smoothActive ? "text-fg" : "text-fg-3"}>{smooth ? "ON" : "OFF"}</span>
-              </span>
             </ToolButton>
           </div>
           {timeframeControl}
@@ -712,6 +732,16 @@ export function MicroChart({
             <span>
               V <span className="text-fg">{shown.a > 0 ? fmtUsd(shown.a) : shown.v.toLocaleString("en-US")}</span>
             </span>
+            {shownLiq && shownLiq.longUsd > 0 && (
+              <span data-testid="readout-long-liq">
+                L-Liq: <span className="text-liq-long">{fmtUsd(shownLiq.longUsd)}</span>
+              </span>
+            )}
+            {shownLiq && shownLiq.shortUsd > 0 && (
+              <span data-testid="readout-short-liq">
+                S-Liq: <span className="text-liq-short">{fmtUsd(shownLiq.shortUsd)}</span>
+              </span>
+            )}
             {smoothActive && (
               <span
                 data-testid="smooth-tag"
@@ -735,6 +765,7 @@ export function MicroChart({
           data-visible-bars={visibleBars}
           data-right-offset={rightOffset}
           data-bg-price={bgPrice ? "on" : "off"}
+          data-liq-overlay={liqOverlay ? "on" : "off"}
           data-smooth={smoothActive ? "on" : "off"}
           role="img"
           aria-label={`${timeframe} candlestick chart, ${n} candles, ${visibleBars} visible${rightOffset ? `, ${rightOffset} bars back` : ", following live"}`}
@@ -749,6 +780,22 @@ export function MicroChart({
             n ? "cursor-crosshair active:cursor-grabbing" : "",
           )}
         />
+        {liqOverlay && n > 0 && (
+          <div
+            data-testid="liq-legend"
+            aria-label="Liquidation overlay legend: purple bars are long liquidations, yellow bars are short liquidations"
+            className="num pointer-events-none absolute left-1 top-1 z-10 inline-flex h-4 items-center gap-1.5 rounded-[2px] border border-line bg-panel px-1 text-[9px] uppercase leading-none tracking-wider text-fg-2"
+          >
+            <span className="inline-flex items-center gap-0.5">
+              <span aria-hidden className="h-1.5 w-1.5 bg-liq-long" />
+              Long Liq
+            </span>
+            <span className="inline-flex items-center gap-0.5">
+              <span aria-hidden className="h-1.5 w-1.5 bg-liq-short" />
+              Short Liq
+            </span>
+          </div>
+        )}
         {rightOffset > 0 && (
           <button
             type="button"

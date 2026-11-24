@@ -2,7 +2,9 @@
 
 import { TIMEFRAMES, type Timeframe } from "@/lib/types";
 import { ContractLookup } from "./ContractLookup";
-import { Kbd, SegmentedControl, Switch, Tooltip } from "./ui/primitives";
+import { ROW_LIMITS, THEMES, type RowLimit, type Theme } from "@/hooks/useAppSettings";
+import { SettingsAction, SettingsDivider, SettingsPopover, SettingsRow, SettingsSwitch } from "./SettingsPopover";
+import { Kbd, SegmentedControl } from "./ui/primitives";
 
 export const MIN_VOLUMES = ["0", "1000000", "5000000", "25000000"] as const;
 export type MinVolume = (typeof MIN_VOLUMES)[number];
@@ -13,15 +15,12 @@ const MIN_VOL_OPTS = [
   { value: "25000000", label: ">$25M" },
 ] as const satisfies ReadonlyArray<{ value: MinVolume; label: string }>;
 
-export const ROW_LIMITS = ["25", "50", "all"] as const;
-export type RowLimit = (typeof ROW_LIMITS)[number];
+export { ROW_LIMITS, type RowLimit, type Theme };
 const LIMIT_OPTS = [
   { value: "25", label: "Top 25" },
   { value: "50", label: "Top 50" },
   { value: "all", label: "All" },
 ] as const satisfies ReadonlyArray<{ value: RowLimit; label: string }>;
-
-export type Theme = "dark" | "light";
 
 interface Props {
   timeframe: Timeframe;
@@ -33,7 +32,7 @@ interface Props {
   query: string;
   onQuery: (q: string) => void;
   theme: Theme;
-  onToggleTheme: () => void;
+  onTheme: (t: Theme) => void;
   pingOn: boolean;
   onPing: (on: boolean) => void;
   onTestPing: () => void;
@@ -43,7 +42,7 @@ interface Props {
 }
 
 function Filters(
-  p: Pick<Props, "minVolume" | "onMinVolume" | "limit" | "onLimit" | "query" | "onQuery" | "onOpenContract" | "focused">,
+  p: Pick<Props, "minVolume" | "onMinVolume" | "query" | "onQuery" | "onOpenContract" | "focused">,
 ) {
   return (
     <>
@@ -51,7 +50,6 @@ function Filters(
         <span className="text-[10px] font-medium uppercase tracking-wider text-fg-3">24h Vol</span>
         <SegmentedControl label="Minimum 24h volume" value={p.minVolume} onChange={p.onMinVolume} options={MIN_VOL_OPTS} mono />
       </div>
-      <SegmentedControl label="Row count" value={p.limit} onChange={p.onLimit} options={LIMIT_OPTS} />
       <ContractLookup
         query={p.query}
         onQuery={p.onQuery}
@@ -97,43 +95,30 @@ export function TerminalHeader(p: Props) {
           <Filters {...p} />
         </div>
 
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          <Tooltip content="Toggle theme (T)">
-            <button
-              type="button"
-              onClick={p.onToggleTheme}
-              aria-label={`Theme: ${p.theme}. Switch to ${p.theme === "dark" ? "light" : "dark"}`}
-              className="inline-flex h-7 items-center gap-1.5 rounded-[3px] border border-line px-2 text-[11.5px] font-medium text-fg-2 hover:text-fg"
-            >
-              {p.theme === "dark" ? (
-                <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden fill="currentColor">
-                  <path d="M6.2 1.5a6.5 6.5 0 1 0 8.3 8.3A5.5 5.5 0 0 1 6.2 1.5z" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.5">
-                  <circle cx="8" cy="8" r="3" />
-                  <path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3 3l1 1M12 12l1 1M3 13l1-1M12 4l1-1" />
-                </svg>
-              )}
-              <span className="hidden sm:inline">{p.theme === "dark" ? "Dark" : "Light"}</span>
-            </button>
-          </Tooltip>
-
-          <div className="flex h-7 items-center rounded-[3px] border border-line">
-            <Switch checked={p.pingOn} onChange={p.onPing} label="Top 10 audio alert">
-              <span className="num">
-                Ping: <span className={p.pingOn ? "text-gain" : "text-fg-2"}>{p.pingOn ? "ON" : "OFF"}</span>
-              </span>
-            </Switch>
-            <button
-              type="button"
-              onClick={p.onTestPing}
-              title="Play the test chime (also unlocks browser audio)"
-              className="h-full border-l border-line px-2 text-[11px] font-medium text-fg-2 hover:bg-row-hover hover:text-fg"
-            >
-              Test
-            </button>
-          </div>
+        <div className="ml-auto flex shrink-0 items-center">
+          {/* Theme, Top 10 ping and leaderboard depth live in the cog; live filters stay in the bar. */}
+          <SettingsPopover label="Scanner settings" testId="main-settings">
+            <SettingsRow label="Theme" hint="Shortcut: T">
+              <SegmentedControl
+                label="Theme"
+                value={p.theme}
+                onChange={p.onTheme}
+                options={THEMES.map((t) => ({ value: t, label: t === "dark" ? "Dark" : "Light" }))}
+                compact
+              />
+            </SettingsRow>
+            <SettingsDivider />
+            <SettingsRow label="Top 10 ping" hint="Chime when a contract enters the Top 10 from outside the Top 15">
+              <SettingsSwitch label="Top 10 entry ping" testId="set-top-ping" checked={p.pingOn} onChange={p.onPing} />
+              <SettingsAction label="Play test chime (also unlocks browser audio)" testId="test-ping" onClick={p.onTestPing}>
+                Test
+              </SettingsAction>
+            </SettingsRow>
+            <SettingsDivider />
+            <SettingsRow label="Depth">
+              <SegmentedControl label="Leaderboard depth" value={p.limit} onChange={p.onLimit} options={LIMIT_OPTS} compact />
+            </SettingsRow>
+          </SettingsPopover>
         </div>
       </header>
 

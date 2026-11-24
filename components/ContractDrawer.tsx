@@ -1,8 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  THEMES,
+  useBgPriceSetting,
+  useLiqOverlaySetting,
+  useLiqPingSetting,
+  useSmoothSetting,
+  useThemeSetting,
+} from "@/hooks/useAppSettings";
 import { useContractFeed } from "@/hooks/useContractFeed";
 import { useCrossExchangeLiquidations } from "@/hooks/useCrossExchangeLiquidations";
+import { playLongLiqPing, playShortLiqPing, unlockAudio } from "@/lib/audio";
 import { calculateBiasScore } from "@/lib/biasScore";
 import type { ContractSnapshot } from "@/lib/contractFeed";
 import { fmtPct, fmtUsd1, makePriceFormatter } from "@/lib/format";
@@ -10,6 +19,7 @@ import type { ContractTicker } from "@/lib/types";
 import { DirectionalBiasBar } from "./DirectionalBiasBar";
 import { LiquidationsPanel } from "./LiquidationsPanel";
 import { MicroChart, type ChartTimeframe } from "./MicroChart";
+import { SettingsAction, SettingsDivider, SettingsPopover, SettingsRow, SettingsSwitch } from "./SettingsPopover";
 import { Badge, SegmentedControl, cx } from "./ui/primitives";
 
 const CHART_TFS = [
@@ -125,16 +135,64 @@ function PriceStrip({ ticker: t, priceScale }: { ticker: ContractTicker | null; 
  * Contract Inspection Drawer: a 520px right slide-over below the top bar on desktop, and a
  * full-screen sheet on mobile. It is not modal: the scanner and its Top 10 alerts keep running.
  */
-export function ContractDrawer({
-  symbol,
-  onClose,
-  soundEnabled,
-}: {
-  symbol: string;
-  onClose: () => void;
-  /** Global Ping: ON / OFF toggle. */
-  soundEnabled: boolean;
-}) {
+/** Drawer cog: theme, liquidation pings (+ audition), chart overlay, smoothing, background price. */
+function DrawerSettings() {
+  const [theme, setTheme] = useThemeSetting();
+  const [liqPing, setLiqPing] = useLiqPingSetting();
+  const [liqOverlay, setLiqOverlay] = useLiqOverlaySetting();
+  const [smooth, setSmooth] = useSmoothSetting();
+  const [bgPrice, setBgPrice] = useBgPriceSetting();
+  const audition = async (side: "LONG" | "SHORT") => {
+    await unlockAudio(); // a click is a user gesture: also unlocks live pings
+    if (side === "LONG") playLongLiqPing();
+    else playShortLiqPing();
+  };
+  return (
+    <SettingsPopover label="Chart & drawer settings" testId="drawer-settings">
+      <SettingsRow label="Theme">
+        <SegmentedControl
+          label="Theme"
+          value={theme}
+          onChange={setTheme}
+          options={THEMES.map((t) => ({ value: t, label: t === "dark" ? "Dark" : "Light" }))}
+          compact
+        />
+      </SettingsRow>
+      <SettingsDivider />
+      <SettingsRow label="Liq pings" hint="Live LONG / SHORT liquidation sounds for this coin">
+        <SettingsSwitch
+          label="Liquidation audio pings"
+          testId="set-liq-ping"
+          checked={liqPing}
+          onChange={(v) => {
+            setLiqPing(v);
+            if (v) void unlockAudio();
+          }}
+        />
+      </SettingsRow>
+      <SettingsRow label="Audition">
+        <SettingsAction label="Play long liquidation ping (740 → 554 Hz)" testId="preview-long-ping" tone="liq-long" onClick={() => void audition("LONG")}>
+          ▼ Long
+        </SettingsAction>
+        <SettingsAction label="Play short liquidation ping (880 → 1245 Hz)" testId="preview-short-ping" tone="liq-short" onClick={() => void audition("SHORT")}>
+          ▲ Short
+        </SettingsAction>
+      </SettingsRow>
+      <SettingsDivider />
+      <SettingsRow label="Chart liqs" hint="Liquidation bars over the volume bars (purple = longs, yellow = shorts)">
+        <SettingsSwitch label="Chart liquidations overlay" testId="set-liq-overlay" checked={liqOverlay} onChange={setLiqOverlay} />
+      </SettingsRow>
+      <SettingsRow label="Smoothing" hint="Gap-free Heikin-Ashi candles on 10S / 1S (prices stay exact)">
+        <SettingsSwitch label="Candle smoothing" testId="set-smooth" checked={smooth} onChange={setSmooth} />
+      </SettingsRow>
+      <SettingsRow label="BG price" hint="Large live price watermark behind the candles">
+        <SettingsSwitch label="Background price watermark" testId="set-bg-price" checked={bgPrice} onChange={setBgPrice} />
+      </SettingsRow>
+    </SettingsPopover>
+  );
+}
+
+export function ContractDrawer({ symbol, onClose }: { symbol: string; onClose: () => void }) {
   const feed = useContractFeed(symbol);
   const closeRef = useRef<HTMLButtonElement>(null);
   // Liquidation pings only fire for events received after this moment. The drawer is keyed by
@@ -182,6 +240,7 @@ export function ContractDrawer({
         >
           Trade ↗
         </a>
+        <DrawerSettings />
         <button
           ref={closeRef}
           type="button"
@@ -205,7 +264,7 @@ export function ContractDrawer({
           </div>
         ) : (
           // Mounted only for a valid contract, so a 404 never opens liquidation sockets.
-          <InspectorBody symbol={symbol} feed={feed} soundEnabled={soundEnabled} drawerOpenedAtRef={drawerOpenedAtRef} />
+          <InspectorBody symbol={symbol} feed={feed} drawerOpenedAtRef={drawerOpenedAtRef} />
         )}
       </div>
     </aside>
@@ -215,14 +274,16 @@ export function ContractDrawer({
 function InspectorBody({
   symbol,
   feed,
-  soundEnabled,
   drawerOpenedAtRef,
 }: {
   symbol: string;
   feed: ContractSnapshot;
-  soundEnabled: boolean;
   drawerOpenedAtRef: RefObject<number>;
 }) {
+  const [soundEnabled] = useLiqPingSetting();
+  const [liqOverlay] = useLiqOverlaySetting();
+  const [smooth] = useSmoothSetting();
+  const [bgPrice] = useBgPriceSetting();
   const liqs = useCrossExchangeLiquidations(symbol, feed.detail?.baseCoin, {
     enabled: feed.status === "ready",
     soundEnabled,
@@ -245,6 +306,8 @@ function InspectorBody({
     () => makePriceFormatter(feed.ticker?.lastPrice ?? 0, feed.detail?.priceScale ?? null),
     [feed.ticker?.lastPrice, feed.detail?.priceScale],
   );
+  // Rolling 15m window + session tape (the bucketing dedupes by id). Stable between flushes.
+  const liqEvents = useMemo(() => [...liqs.windowEvents, ...liqs.tape], [liqs.windowEvents, liqs.tape]);
   const liqReady = liqs.status.BN === "open" || liqs.status.BYB === "open" || liqs.status.OKX === "open";
 
   return (
@@ -268,6 +331,10 @@ function InspectorBody({
           }
           livePrice={feed.ticker?.lastPrice ?? null}
           formatPrice={chartFmt}
+          bgPrice={bgPrice}
+          smooth={smooth}
+          liqOverlay={liqOverlay}
+          liquidations={liqEvents}
           emptyLabel={
             feed.status === "loading" ? `Loading ${symbol}…` : tf === "1M" ? "No candles" : "Waiting for trades…"
           }
@@ -276,7 +343,7 @@ function InspectorBody({
 
       {/* Liquidations */}
       <div className="px-2 py-2 sm:px-3">
-        <LiquidationsPanel snap={liqs} soundEnabled={soundEnabled} />
+        <LiquidationsPanel snap={liqs} />
       </div>
     </>
   );
