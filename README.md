@@ -175,12 +175,27 @@ All toggles live in a top-right cog: a 28px button that opens a 240px panel. Cli
 | Main page cog | Drawer cog (next to ×) |
 | --- | --- |
 | Theme (Dark / Light, `T`) | Theme (shared with the main page) |
-| Top 10 entry ping + `Test` (`mx-ping`) | Liquidation audio pings + `▼ Long` / `▲ Short` previews (`mexc_liq_ping`, default off) |
+| Alert volume + `Test` | The same alert volume + `▼ Long` / `▲ Short` previews |
 | Leaderboard depth: Top 25 / 50 / All (`mx-limit`) | Chart liquidation overlay (`mexc_chart_liq_overlay`, default on) |
 | | Candle smoothing (`mexc_chart_smooth`, default on) |
 | | Background price (`mexc_chart_bg_price`, default on) |
 
 The header keeps only the live filters (timeframe, 24h volume, search). The chart toolbar keeps only zoom and `1M | 10S | 1S`, which fits on one line at 375px.
+
+### Alert volume
+
+Both cogs show one shared volume control. It is stored as `mexc_audio_volume` (0–100, default 75) and `mexc_audio_prev_volume` (the last non-zero level). The control has three parts:
+
+- **Mute button.** Remembers the current level and sets 0; pressing it again restores the remembered level.
+- **0–100 slider.** Any level above 0 also becomes the new remembered level.
+- **Live number readout.**
+
+The volume drives the Top 10 chime and the live liquidation pings. 0 plays nothing. Anything above 0 scales each tone's envelope peak by `(v/100)²` (perceptual), using the same click-free ramps. The `Test`, `Long` and `Short` previews still play while muted, at the remembered level. One upgrade case: if you had explicitly switched the old Top 10 ping off, you start muted.
+
+### Leaderboard interactions
+
+- **Row click.** The entire row opens the Contract Inspection Drawer. The main page has no external links; the MEXC link and copy button live in the drawer header.
+- **Vol % sort.** The `Vol %` column header cycles: **↓** highest volume change first, **↑** lowest first, then back to the normal Price Move % order. Each board sorts independently. Contracts without enough history yet sort last. Rank numbers, Top 10 alerts and NEW badges always follow the Price Move % ranking, so re-sorting never triggers a chime.
 
 ### Chart liquidation overlay
 

@@ -3,7 +3,7 @@
 import { TIMEFRAMES, type Timeframe } from "@/lib/types";
 import { ContractLookup } from "./ContractLookup";
 import { ROW_LIMITS, THEMES, type RowLimit, type Theme } from "@/hooks/useAppSettings";
-import { SettingsAction, SettingsDivider, SettingsPopover, SettingsRow, SettingsSwitch } from "./SettingsPopover";
+import { SettingsAction, SettingsDivider, SettingsPopover, SettingsRow, VolumeControl } from "./SettingsPopover";
 import { Kbd, SegmentedControl } from "./ui/primitives";
 
 export const MIN_VOLUMES = ["0", "1000000", "5000000", "25000000"] as const;
@@ -33,8 +33,6 @@ interface Props {
   onQuery: (q: string) => void;
   theme: Theme;
   onTheme: (t: Theme) => void;
-  pingOn: boolean;
-  onPing: (on: boolean) => void;
   onTestPing: () => void;
   onOpenContract: (symbol: string) => void;
   /** Single-coin focus mode (drawer open): the lookup never hits the network. */
@@ -108,8 +106,9 @@ export function TerminalHeader(p: Props) {
               />
             </SettingsRow>
             <SettingsDivider />
-            <SettingsRow label="Top 10 ping" hint="Chime when a contract enters the Top 10 from outside the Top 15">
-              <SettingsSwitch label="Top 10 entry ping" testId="set-top-ping" checked={p.pingOn} onChange={p.onPing} />
+            <div className="px-2.5 pt-1 text-[9.5px] uppercase tracking-wider text-fg-3">Alert volume · Top 10 entry ping</div>
+            <VolumeControl />
+            <SettingsRow label="Preview" hint="Chime when a contract enters the Top 10 from outside the Top 15">
               <SettingsAction label="Play test chime (also unlocks browser audio)" testId="test-ping" onClick={p.onTestPing}>
                 Test
               </SettingsAction>

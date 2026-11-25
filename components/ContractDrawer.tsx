@@ -5,7 +5,7 @@ import {
   THEMES,
   useBgPriceSetting,
   useLiqOverlaySetting,
-  useLiqPingSetting,
+  useAudioVolume,
   useSmoothSetting,
   useThemeSetting,
 } from "@/hooks/useAppSettings";
@@ -19,7 +19,7 @@ import type { ContractTicker } from "@/lib/types";
 import { DirectionalBiasBar } from "./DirectionalBiasBar";
 import { LiquidationsPanel } from "./LiquidationsPanel";
 import { MicroChart, type ChartTimeframe } from "./MicroChart";
-import { SettingsAction, SettingsDivider, SettingsPopover, SettingsRow, SettingsSwitch } from "./SettingsPopover";
+import { SettingsAction, SettingsDivider, SettingsPopover, SettingsRow, SettingsSwitch, VolumeControl } from "./SettingsPopover";
 import { Badge, SegmentedControl, cx } from "./ui/primitives";
 
 const CHART_TFS = [
@@ -135,17 +135,56 @@ function PriceStrip({ ticker: t, priceScale }: { ticker: ContractTicker | null; 
  * Contract Inspection Drawer: a 520px right slide-over below the top bar on desktop, and a
  * full-screen sheet on mobile. It is not modal: the scanner and its Top 10 alerts keep running.
  */
-/** Drawer cog: theme, liquidation pings (+ audition), chart overlay, smoothing, background price. */
+/** One-click copy of the contract symbol (moved here from the leaderboard rows). */
+function CopySymbol({ symbol }: { symbol: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1200);
+    return () => clearTimeout(t);
+  }, [copied]);
+  return (
+    <button
+      type="button"
+      data-testid="drawer-copy"
+      aria-label={copied ? `Copied ${symbol}` : `Copy ${symbol}`}
+      title={copied ? "Copied" : "Copy symbol"}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(symbol);
+          setCopied(true);
+        } catch {
+          /* clipboard unavailable (insecure context / permission denied) */
+        }
+      }}
+      className={cx("inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[2px]", copied ? "text-gain" : "text-fg-3 hover:text-fg")}
+    >
+      {copied ? (
+        <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+          <path d="M3 8.5l3 3 7-7" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+          <rect x="5" y="5" width="8.5" height="8.5" rx="1" />
+          <path d="M10.5 5V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v6.5a1 1 0 0 0 1 1h2" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+/** Drawer cog: theme, shared alert volume (+ Long/Short audition), chart overlay, smoothing, background price. */
 function DrawerSettings() {
   const [theme, setTheme] = useThemeSetting();
-  const [liqPing, setLiqPing] = useLiqPingSetting();
+  const { auditionVolume } = useAudioVolume();
   const [liqOverlay, setLiqOverlay] = useLiqOverlaySetting();
   const [smooth, setSmooth] = useSmoothSetting();
   const [bgPrice, setBgPrice] = useBgPriceSetting();
   const audition = async (side: "LONG" | "SHORT") => {
     await unlockAudio(); // a click is a user gesture: also unlocks live pings
-    if (side === "LONG") playLongLiqPing();
-    else playShortLiqPing();
+    // While muted, preview at the remembered level so the tone can still be heard.
+    if (side === "LONG") playLongLiqPing(auditionVolume);
+    else playShortLiqPing(auditionVolume);
   };
   return (
     <SettingsPopover label="Chart & drawer settings" testId="drawer-settings">
@@ -159,17 +198,8 @@ function DrawerSettings() {
         />
       </SettingsRow>
       <SettingsDivider />
-      <SettingsRow label="Liq pings" hint="Live LONG / SHORT liquidation sounds for this coin">
-        <SettingsSwitch
-          label="Liquidation audio pings"
-          testId="set-liq-ping"
-          checked={liqPing}
-          onChange={(v) => {
-            setLiqPing(v);
-            if (v) void unlockAudio();
-          }}
-        />
-      </SettingsRow>
+      <div className="px-2.5 pt-1 text-[9.5px] uppercase tracking-wider text-fg-3">Alert volume · liquidation pings</div>
+      <VolumeControl />
       <SettingsRow label="Audition">
         <SettingsAction label="Play long liquidation ping (740 → 554 Hz)" testId="preview-long-ping" tone="liq-long" onClick={() => void audition("LONG")}>
           ▼ Long
@@ -224,6 +254,7 @@ export function ContractDrawer({ symbol, onClose }: { symbol: string; onClose: (
           {symbol.replace(/_USDT$/, "")}
           <span className="font-normal text-fg-3">_USDT</span>
         </h2>
+        <CopySymbol symbol={symbol} />
         <Badge>Perp</Badge>
         {feed.status !== "error" && (
           <span
@@ -280,13 +311,13 @@ function InspectorBody({
   feed: ContractSnapshot;
   drawerOpenedAtRef: RefObject<number>;
 }) {
-  const [soundEnabled] = useLiqPingSetting();
+  const { volume } = useAudioVolume();
   const [liqOverlay] = useLiqOverlaySetting();
   const [smooth] = useSmoothSetting();
   const [bgPrice] = useBgPriceSetting();
   const liqs = useCrossExchangeLiquidations(symbol, feed.detail?.baseCoin, {
     enabled: feed.status === "ready",
-    soundEnabled,
+    volume,
     drawerOpenedAtRef,
   });
   const [tf, setTf] = useState<ChartTimeframe>("1M");

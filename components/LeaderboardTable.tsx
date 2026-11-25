@@ -1,9 +1,10 @@
 "use client";
 
-import { Fragment, memo, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useMemo, useState } from "react";
 import { ALERT_ZONE } from "@/lib/alerts";
 import { fmtPct, fmtPrice, fmtUsd } from "@/lib/format";
 import type { Timeframe } from "@/lib/types";
+import { applyVolSort, nextVolSort, type VolSortMode } from "@/lib/volSort";
 import { Badge, cx } from "./ui/primitives";
 
 export interface BoardRow {
@@ -23,29 +24,6 @@ const GRID =
   "grid-cols-[1.5rem_minmax(0,1fr)_auto_4.4rem_4.6rem] " +
   "sm:grid-cols-[1.75rem_minmax(0,1fr)_minmax(5.5rem,auto)_5.25rem_5rem_4.25rem]";
 
-function CopyIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-      <rect x="5" y="5" width="8.5" height="8.5" rx="1" />
-      <path d="M10.5 5V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v6.5a1 1 0 0 0 1 1h2" />
-    </svg>
-  );
-}
-function CheckIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-      <path d="M3 8.5l3 3 7-7" />
-    </svg>
-  );
-}
-function ExternalIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
-      <path d="M9 2h5v5M14 2L7.5 8.5M12 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3.5" />
-    </svg>
-  );
-}
-
 interface RowProps {
   row: BoardRow;
   side: "gain" | "loss";
@@ -53,28 +31,17 @@ interface RowProps {
   /** 0..1 share of the largest |move| shown on this board, sets the magnitude bar width. */
   magnitude: number;
   selected: boolean;
-  onSelect: (symbol: string) => void;
+  onSelectContract: (symbol: string) => void;
 }
 
+/**
+ * One leaderboard row. The WHOLE row is a single click/tap target that opens the Contract
+ * Inspection Drawer. There is deliberately no external link (or other nested control) on the main
+ * page, so a tap can never open a MEXC tab by accident. The MEXC link and copy action live in
+ * the drawer header.
+ */
 const Row = memo(
-  function Row({ row, side, isNew, magnitude, selected, onSelect }: RowProps) {
-    const [copied, setCopied] = useState(false);
-    const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-    useEffect(() => () => {
-      if (timer.current) clearTimeout(timer.current);
-    }, []);
-
-    const copy = useCallback(async () => {
-      try {
-        await navigator.clipboard.writeText(row.symbol);
-        setCopied(true);
-        if (timer.current) clearTimeout(timer.current);
-        timer.current = setTimeout(() => setCopied(false), 1200);
-      } catch {
-        /* clipboard unavailable (insecure context / permission denied) */
-      }
-    }, [row.symbol]);
-
+  function Row({ row, side, isNew, magnitude, selected, onSelectContract }: RowProps) {
     const vol = row.volChange;
     const volTone = vol === null ? "text-fg-3" : vol >= 100 ? "text-alert" : vol >= 0 ? "text-fg" : "text-fg-2";
     const base = row.symbol.replace(/_USDT$/, "");
@@ -84,12 +51,13 @@ const Row = memo(
         role="row"
         tabIndex={0}
         aria-selected={selected}
+        aria-label={`Open ${row.symbol} details`}
         data-row-symbol={row.symbol}
-        onClick={() => onSelect(row.symbol)}
+        onClick={() => onSelectContract(row.symbol)}
         onKeyDown={(e) => {
           if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
             e.preventDefault();
-            onSelect(row.symbol);
+            onSelectContract(row.symbol);
           }
         }}
         className={cx(
@@ -111,42 +79,15 @@ const Row = memo(
         </span>
 
         <span role="cell" className="relative flex min-w-0 items-center gap-1.5">
-          <a
-            href={`https://futures.mexc.com/exchange/${row.symbol}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            title={`Open ${row.symbol} on MEXC Futures`}
-            onClick={(e) => e.stopPropagation()}
-            className="group/link inline-flex min-w-0 items-center gap-1 font-medium text-fg hover:underline hover:decoration-fg-3 hover:underline-offset-2"
-          >
-            <span className="truncate">
-              {base}
-              <span className="hidden text-fg-3 sm:inline">_USDT</span>
-            </span>
-            <span className="shrink-0 text-fg-3 opacity-0 group-hover/link:opacity-100 group-focus-visible/link:opacity-100">
-              <ExternalIcon />
-            </span>
-          </a>
+          <span className="min-w-0 truncate font-medium text-fg group-hover:underline group-hover:decoration-fg-3 group-hover:underline-offset-2">
+            {base}
+            <span className="hidden text-fg-3 sm:inline">_USDT</span>
+          </span>
           {isNew && (
             <Badge tone="alert" className="shrink-0">
               New
             </Badge>
           )}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              void copy();
-            }}
-            aria-label={copied ? `Copied ${row.symbol}` : `Copy ${row.symbol}`}
-            title={copied ? "Copied" : "Copy symbol"}
-            className={cx(
-              "ml-auto shrink-0 rounded-[2px] p-1 sm:ml-0 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100",
-              copied ? "text-gain sm:opacity-100" : "text-fg-3 hover:text-fg",
-            )}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </button>
         </span>
 
         <span role="cell" className="num relative text-right text-[12px] text-fg">
@@ -178,7 +119,7 @@ const Row = memo(
   (a, b) =>
     a.isNew === b.isNew &&
     a.selected === b.selected &&
-    a.onSelect === b.onSelect &&
+    a.onSelectContract === b.onSelectContract &&
     a.side === b.side &&
     a.magnitude === b.magnitude &&
     a.row.rank === b.row.rank &&
@@ -210,7 +151,7 @@ export function LeaderboardTable({
   totalRanked,
   loading,
   selectedSymbol,
-  onSelect,
+  onSelectContract,
   paused = false,
 }: {
   title: string;
@@ -222,11 +163,15 @@ export function LeaderboardTable({
   totalRanked: number;
   loading: boolean;
   selectedSymbol: string | null;
-  onSelect: (symbol: string) => void;
+  onSelectContract: (symbol: string) => void;
   /** Focus mode: the board is frozen (no re-sort or re-render) until the drawer closes. */
   paused?: boolean;
 }) {
   const headId = `${side}-board-title`;
+  // Per-table Vol % sort. Display order only: ranks, alerts and NEW badges stay on the price ranking.
+  const [volSort, setVolSort] = useState<VolSortMode>("default");
+  const shown = useMemo(() => applyVolSort(rows, volSort), [rows, volSort]);
+  const sortArrow = volSort === "vol_desc" ? "↓" : volSort === "vol_asc" ? "↑" : "";
   let maxAbs = 0;
   for (const r of rows) maxAbs = Math.max(maxAbs, Math.abs(r.move));
 
@@ -251,13 +196,31 @@ export function LeaderboardTable({
         </div>
         <div
           role="row"
-          className={cx(GRID, "h-6 border-b border-line text-[10px] font-medium uppercase tracking-wider text-fg-3")}
+          className={cx(GRID, "h-8 border-b border-line text-[10px] font-medium uppercase tracking-wider text-fg-3")}
         >
           <span role="columnheader">#</span>
           <span role="columnheader">Contract</span>
           <span role="columnheader" className="text-right">Price</span>
           <span role="columnheader" className="text-right">{timeframe} %</span>
-          <span role="columnheader" className="text-right">{timeframe} Vol %</span>
+          <button
+            type="button"
+            role="columnheader"
+            aria-sort={volSort === "vol_desc" ? "descending" : volSort === "vol_asc" ? "ascending" : "none"}
+            aria-label={`${timeframe} volume change: ${volSort === "default" ? "sorted by price move" : volSort === "vol_desc" ? "highest first" : "lowest first"}. Tap to change sort.`}
+            title="Sort by volume change: highest first → lowest first → price move"
+            data-testid={`${side}-volsort`}
+            data-sort={volSort}
+            onClick={() => setVolSort(nextVolSort)}
+            className={cx(
+              "-my-px flex h-8 cursor-pointer select-none items-center justify-end gap-0.5 whitespace-nowrap uppercase tracking-wider hover:text-fg",
+              volSort !== "default" && "text-fg",
+            )}
+          >
+            {timeframe} Vol %
+            <span aria-hidden className="num inline-block w-[1ch] text-center text-[11px] leading-none">
+              {sortArrow}
+            </span>
+          </button>
           <span role="columnheader" className="hidden text-right sm:block">{timeframe} Vol $</span>
         </div>
       </div>
@@ -276,19 +239,19 @@ export function LeaderboardTable({
             No {side === "gain" ? "gainers" : "losers"} match the current filters.
           </p>
         ) : (
-          rows.map((r, i) => {
+          shown.map((r, i) => {
             const exp = newBadges.get(r.symbol);
-            const prev = rows[i - 1];
+            const prev = shown[i - 1];
             return (
               <Fragment key={r.symbol}>
-                {prev && prev.rank === ALERT_ZONE && r.rank === ALERT_ZONE + 1 && <AlertDivider />}
+                {volSort === "default" && prev && prev.rank === ALERT_ZONE && r.rank === ALERT_ZONE + 1 && <AlertDivider />}
                 <Row
                   row={r}
                   side={side}
                   isNew={exp !== undefined && exp > now}
                   magnitude={maxAbs > 0 ? Math.round((Math.abs(r.move) / maxAbs) * 50) / 50 : 0}
                   selected={r.symbol === selectedSymbol}
-                  onSelect={onSelect}
+                  onSelectContract={onSelectContract}
                 />
               </Fragment>
             );

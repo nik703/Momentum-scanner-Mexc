@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useAudioVolume } from "@/hooks/useAppSettings";
+import { unlockAudio } from "@/lib/audio";
 import { cx } from "./ui/primitives";
 
 function CogIcon() {
@@ -172,5 +174,71 @@ export function SettingsAction({
     >
       {children}
     </button>
+  );
+}
+
+function SpeakerIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+      <path d="M2.5 6v4h2.6L8.5 13V3L5.1 6z" fill="currentColor" stroke="none" />
+      {muted ? (
+        <path d="M10.5 6l3.5 4M14 6l-3.5 4" strokeLinecap="round" />
+      ) : (
+        <>
+          <path d="M10.6 5.8a3 3 0 0 1 0 4.4" strokeLinecap="round" />
+          <path d="M12.3 4.2a5.3 5.3 0 0 1 0 7.6" strokeLinecap="round" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Shared 0–100 alert volume: mute/unmute button (remembers the previous level), range slider,
+ * and live numeric readout. Both cogs render this same control against the same persisted
+ * state, so they always agree.
+ */
+export function VolumeControl({ testIdPrefix = "volume" }: { testIdPrefix?: string }) {
+  const { volume, setVolume, toggleMute } = useAudioVolume();
+  const muted = volume === 0;
+  return (
+    <div className="flex h-8 items-center gap-2 px-2.5" data-testid={`${testIdPrefix}-control`}>
+      <button
+        type="button"
+        onClick={() => {
+          toggleMute();
+          if (muted) void unlockAudio(); // unmuting is a user gesture: unlock audio too
+        }}
+        aria-label={muted ? "Unmute alerts" : "Mute alerts"}
+        aria-pressed={muted}
+        title={muted ? "Unmute (restore previous volume)" : "Mute"}
+        data-testid={`${testIdPrefix}-mute`}
+        className={cx(
+          "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[3px] border border-line hover:bg-row-hover",
+          muted ? "text-fg-3" : "text-fg",
+        )}
+      >
+        <SpeakerIcon muted={muted} />
+      </button>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        step={1}
+        value={volume}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          setVolume(v);
+          if (v > 0) void unlockAudio(); // a drag is a user gesture
+        }}
+        aria-label="Alert volume"
+        aria-valuetext={muted ? "Muted" : `${volume} percent`}
+        data-testid={`${testIdPrefix}-slider`}
+        className="h-1 min-w-0 flex-1 cursor-pointer accent-gain"
+      />
+      <span className="w-7 text-right font-mono text-[11px] tabular-nums text-fg" data-testid={`${testIdPrefix}-readout`} aria-hidden>
+        {volume}
+      </span>
+    </div>
   );
 }

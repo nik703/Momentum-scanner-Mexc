@@ -24,7 +24,8 @@ interface Options {
   minVolume: string;
   /** Live socket is CONNECTED. Rankings keep updating silently while it is not. */
   live: boolean;
-  pingEnabled: boolean;
+  /** Shared 0..100 alert volume; 0 = muted. */
+  volume: number;
   /** Contract Inspection Drawer is open: leaderboard sounds are muted, tracking continues. */
   isDrawerOpen: boolean;
   /** Catch-up /api/scanner sync after closing the drawer is in flight. */
@@ -59,7 +60,7 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
   const engine = useRef<LeaderboardAlertEngine | null>(null);
   const lastChimeAt = useRef(0);
   const pendingChime = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pingEnabled = useRef(o.pingEnabled);
+  const volume = useRef(o.volume);
   const muted = useRef(o.isDrawerOpen);
   const resyncing = useRef(Boolean(o.resyncing));
   const settleUntil = useRef(0);
@@ -73,7 +74,7 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
   // Declared before the evaluation effect, so a commit that opens the drawer updates the
   // mute flag before that same commit's rank tick is evaluated.
   useEffect(() => {
-    pingEnabled.current = o.pingEnabled;
+    volume.current = o.volume;
     // Drawer just closed: the next ranking frames are a restore of stale boards followed by
     // fresh ticks and a catch-up sync. They re-seed silently instead of chiming late.
     if (muted.current && !o.isDrawerOpen) {
@@ -94,7 +95,7 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
       clearTimeout(pendingChime.current);
       pendingChime.current = null;
     }
-  }, [o.pingEnabled, o.isDrawerOpen, o.resyncing, o.lastTickAt]);
+  }, [o.volume, o.isDrawerOpen, o.resyncing, o.lastTickAt]);
 
   useEffect(
     () => () => {
@@ -139,17 +140,17 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
       losersNew: withBadges(s.losersNew, d.losers, now),
     }));
 
-    if (!d.audible || !pingEnabled.current) return;
+    if (!d.audible || volume.current <= 0) return;
     const since = now - lastChimeAt.current;
     if (since >= CHIME_COOLDOWN_MS) {
       lastChimeAt.current = now;
-      playLeaderboardPing();
+      playLeaderboardPing(volume.current);
     } else if (!pendingChime.current) {
       pendingChime.current = setTimeout(() => {
         pendingChime.current = null;
-        if (!pingEnabled.current || muted.current) return; // drawer may have opened meanwhile
+        if (volume.current <= 0 || muted.current) return; // muted, or the drawer opened meanwhile
         lastChimeAt.current = Date.now();
-        playLeaderboardPing();
+        playLeaderboardPing(volume.current);
       }, CHIME_COOLDOWN_MS - since);
     }
   }, [o.gainers, o.losers, o.timeframe, o.minVolume, o.live]);

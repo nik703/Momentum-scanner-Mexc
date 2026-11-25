@@ -9,8 +9,8 @@ import { baseAsset } from "@/lib/symbol";
 interface Options {
   /** Start streaming only once the contract is confirmed, so an unknown symbol never opens sockets. */
   enabled: boolean;
-  /** Global Ping: ON / OFF master toggle from the top bar. */
-  soundEnabled: boolean;
+  /** Shared 0..100 alert volume (0 = muted). */
+  volume: number;
   /**
    * When the drawer opened for this contract (epoch ms). Only events received at or after it
    * produce a ping. Switching contracts remounts the drawer, which resets it.
@@ -30,24 +30,25 @@ interface Options {
 export function useCrossExchangeLiquidations(
   symbol: string,
   baseCoin: string | null | undefined,
-  { enabled, soundEnabled, drawerOpenedAtRef }: Options,
+  { enabled, volume, drawerOpenedAtRef }: Options,
 ): LiquidationSnapshot {
   const base = baseAsset(baseCoin ? `${baseCoin}_USDT` : symbol);
   const feed = useMemo(() => new LiquidationFeed(base), [base]);
-  const soundRef = useRef(soundEnabled);
+  const volumeRef = useRef(volume);
 
   useEffect(() => {
-    soundRef.current = soundEnabled;
-  }, [soundEnabled]);
+    volumeRef.current = volume;
+  }, [volume]);
 
   useEffect(() => {
     if (!enabled) return;
     // Arm no earlier than the moment this feed starts, even if the ref hasn't been set yet.
     const armedAt = Math.max(drawerOpenedAtRef.current, Date.now());
     const off = feed.onEvents((events) => {
-      for (const side of selectLivePings(events, armedAt, soundRef.current)) {
-        if (side === "LONG") playLongLiqPing();
-        else playShortLiqPing();
+      const v = volumeRef.current;
+      for (const side of selectLivePings(events, armedAt, v > 0)) {
+        if (side === "LONG") playLongLiqPing(v);
+        else playShortLiqPing(v);
       }
     });
     feed.start();

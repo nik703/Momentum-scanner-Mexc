@@ -6,7 +6,8 @@
  */
 import assert from "node:assert/strict";
 import { LeaderboardAlertEngine } from "../lib/alerts.ts";
-import { nextPingSlot } from "../lib/audio.ts";
+import { nextPingSlot, volumeGain } from "../lib/audio.ts";
+import { applyVolSort, nextVolSort } from "../lib/volSort.ts";
 import {
   anchorFor,
   candleX,
@@ -707,6 +708,39 @@ check("overlay geometry: single centered thin bar / dual side-by-side bars, 3px 
   assert.equal((two[0].x + two[1].x + two[1].w) / 2, 50); // pair centered
   assert.equal(two[0].h, 40); // clamped to the volume zone
   assert.deepEqual(liqBarLayout({ longUsd: 0, shortUsd: 0 }, 0, 10, 1, 40), []);
+});
+
+/* ------------------------------------------------------------------ */
+console.log("\n[9] Vol % sort + volume curve");
+
+check("Vol % header cycles default -> desc -> asc -> default", () => {
+  assert.equal(nextVolSort("default"), "vol_desc");
+  assert.equal(nextVolSort("vol_desc"), "vol_asc");
+  assert.equal(nextVolSort("vol_asc"), "default");
+});
+
+check("applyVolSort: desc/asc by volChange, nulls last both ways, ties keep price rank, default untouched", () => {
+  const rows = [
+    { rank: 1, volChange: 20 },
+    { rank: 2, volChange: null },
+    { rank: 3, volChange: 250 },
+    { rank: 4, volChange: -40 },
+    { rank: 5, volChange: 20 },
+  ];
+  assert.deepEqual(applyVolSort(rows, "vol_desc").map((r) => r.rank), [3, 1, 5, 4, 2]);
+  assert.deepEqual(applyVolSort(rows, "vol_asc").map((r) => r.rank), [4, 1, 5, 3, 2]);
+  assert.equal(applyVolSort(rows, "default"), rows);
+  assert.deepEqual(rows.map((r) => r.rank), [1, 2, 3, 4, 5], "input not mutated");
+});
+
+check("volumeGain: 0/invalid = silent, perceptual curve, capped at 1", () => {
+  assert.equal(volumeGain(0), 0);
+  assert.equal(volumeGain(-5), 0);
+  assert.equal(volumeGain(Number.NaN), 0);
+  assert.equal(volumeGain(100), 1);
+  assert.equal(volumeGain(150), 1);
+  assert.equal(volumeGain(50), 0.25);
+  assert.ok(volumeGain(42) > volumeGain(41));
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

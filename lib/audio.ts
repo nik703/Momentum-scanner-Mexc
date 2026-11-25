@@ -3,9 +3,14 @@
  * click-free exponential gain envelope (setValueAtTime -> exponentialRamp to peak ->
  * exponentialRampToValueAtTime(0.0001)).
  *
- *   playLeaderboardPing()  880 -> 1320 Hz, upward, 180ms per tone   (Top 10 entry)
- *   playShortLiqPing()     880 -> 1245 Hz, ascending, 160ms total   (short squeezed: forced buy, bullish)
- *   playLongLiqPing()      740 ->  554 Hz, descending, 160ms total  (long flushed: forced sell, bearish)
+ *   playLeaderboardPing(v)  880 -> 1320 Hz, upward, 180ms per tone   (Top 10 entry)
+ *   playShortLiqPing(v)     880 -> 1245 Hz, ascending, 160ms total   (short squeezed: forced buy, bullish)
+ *   playLongLiqPing(v)      740 ->  554 Hz, descending, 160ms total  (long flushed: forced sell, bearish)
+ *
+ * `v` is the user's 0..100 volume. 0 (or less) returns immediately without touching the audio
+ * graph. Otherwise the envelope PEAK is scaled by a perceptual (squared) curve, so 50 sounds
+ * roughly half as loud as 100. The attack and decay ramps are unchanged, so every level stays
+ * click-free.
  *
  * Liquidation pings go through a 90ms cadence scheduler, so simultaneous fills across
  * Binance, Bybit and OKX play in sequence instead of stacking and clipping.
@@ -45,6 +50,16 @@ export function isAudioUnlocked(): boolean {
 const ATTACK_S = 0.008;
 const SILENCE = 0.0001;
 
+/** 0..100 -> 0..1 gain multiplier on a perceptual (squared) curve; 0 for invalid or non-positive input. */
+export function volumeGain(volume: number): number {
+  if (!Number.isFinite(volume) || volume <= 0) return 0;
+  const v = Math.min(100, volume) / 100;
+  return v * v;
+}
+
+/** Scaled peak, kept above the silence floor so the exponential ramps stay valid (no clicks). */
+const scaledPeak = (peak: number, volume: number) => Math.max(SILENCE * 1.5, peak * volumeGain(volume));
+
 /** One sine note with a click-free exponential attack and decay. `decay` is the note length in seconds. */
 function tone(c: AudioContext, freq: number, at: number, peak: number, decay: number) {
   const osc = c.createOscillator();
@@ -65,12 +80,13 @@ function runningCtx(): AudioContext | null {
 }
 
 /** Top 10 leaderboard entry: crisp upward two-tone (880 -> 1320 Hz), 180ms envelope per tone. */
-export function playLeaderboardPing(): void {
+export function playLeaderboardPing(volume: number): void {
+  if (!(volume > 0)) return;
   const c = runningCtx();
   if (!c) return;
   const t = c.currentTime + 0.01;
-  tone(c, 880, t, 0.18, 0.18);
-  tone(c, 1320, t + 0.09, 0.16, 0.18);
+  tone(c, 880, t, scaledPeak(0.18, volume), 0.18);
+  tone(c, 1320, t + 0.09, scaledPeak(0.16, volume), 0.18);
 }
 
 /* ------------------------------------------------------------------ */
@@ -101,23 +117,25 @@ export function nextPingSlot(
 
 let liqNextFree = 0;
 
-function playLiq(f1: number, f2: number): boolean {
+function playLiq(f1: number, f2: number, volume: number): boolean {
+  if (!(volume > 0)) return false;
   const c = runningCtx();
   if (!c) return false;
   const slot = nextPingSlot(c.currentTime + 0.005, liqNextFree);
   if (!slot) return false;
   liqNextFree = slot.nextFree;
-  tone(c, f1, slot.at, LIQ_PEAK, LIQ_NOTE_S);
-  tone(c, f2, slot.at + LIQ_NOTE2_OFFSET_S, LIQ_PEAK, LIQ_NOTE_S);
+  const peak = scaledPeak(LIQ_PEAK, volume);
+  tone(c, f1, slot.at, peak, LIQ_NOTE_S);
+  tone(c, f2, slot.at + LIQ_NOTE2_OFFSET_S, peak, LIQ_NOTE_S);
   return true;
 }
 
 /** Short liquidated (forced buy, upward squeeze): ascending 880 -> 1245 Hz. */
-export function playShortLiqPing(): boolean {
-  return playLiq(880, 1245);
+export function playShortLiqPing(volume: number): boolean {
+  return playLiq(880, 1245, volume);
 }
 
 /** Long liquidated (forced sell, downward flush): descending 740 -> 554 Hz. */
-export function playLongLiqPing(): boolean {
-  return playLiq(740, 554);
+export function playLongLiqPing(volume: number): boolean {
+  return playLiq(740, 554, volume);
 }

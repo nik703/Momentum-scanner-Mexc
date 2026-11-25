@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useScanner } from "@/hooks/useScanner";
+import { migrateLegacyAudio, useAudioVolume } from "@/hooks/useAppSettings";
 import { prefetchUniverse } from "@/hooks/useContractUniverse";
 import { useLeaderboardAlerts } from "@/hooks/useLeaderboardAlerts";
 import { usePersistentState } from "@/hooks/usePersistentState";
@@ -21,8 +22,9 @@ import {
 import { Badge } from "./ui/primitives";
 
 const THEMES = ["dark", "light"] as const satisfies readonly Theme[];
-const PING_STATES = ["off", "on"] as const;
-type PingState = (typeof PING_STATES)[number];
+// One-time: carry an explicit old "Ping: OFF" over to a muted volume. Runs at module load, before
+// any component reads the persisted volume.
+if (typeof window !== "undefined") migrateLegacyAudio();
 
 function normalize(q: string): string {
   return q.toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -44,7 +46,7 @@ export function Scanner() {
   const [minVol, setMinVol] = usePersistentState<MinVolume>("mx-minvol", "0", MIN_VOLUMES);
   const [limit, setLimit] = usePersistentState<RowLimit>("mx-limit", "25", ROW_LIMITS);
   const [theme, setTheme] = usePersistentState<Theme>("mx-theme", "dark", THEMES);
-  const [ping, setPing] = usePersistentState<PingState>("mx-ping", "off", PING_STATES);
+  const { volume, auditionVolume } = useAudioVolume();
   const [query, setQuery] = useState("");
   const [inspect, setInspect] = useState<string | null>(null);
   const closeDrawer = useCallback(() => setInspect(null), []);
@@ -78,9 +80,9 @@ export function Scanner() {
   }, [theme]);
   const toggleTheme = useCallback(() => setTheme(theme === "dark" ? "light" : "dark"), [theme, setTheme]);
 
-  // Browsers only start audio after a user gesture. If Ping was saved as ON, unlock audio on the first gesture.
+  // Browsers only start audio after a user gesture. If the volume is above 0, unlock audio on the first gesture.
   useEffect(() => {
-    if (ping !== "on" || audioReady) return;
+    if (volume <= 0 || audioReady) return;
     const unlock = () => void unlockAudio().then(setAudioReady);
     window.addEventListener("pointerdown", unlock, { once: true });
     window.addEventListener("keydown", unlock, { once: true });
@@ -88,20 +90,13 @@ export function Scanner() {
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
     };
-  }, [ping, audioReady]);
+  }, [volume, audioReady]);
 
-  const onPing = useCallback(
-    (on: boolean) => {
-      setPing(on ? "on" : "off");
-      if (on) void unlockAudio().then(setAudioReady);
-    },
-    [setPing],
-  );
-
+  // Test plays at the current volume, or at the remembered level while muted.
   const onTestPing = useCallback(async () => {
     setAudioReady(await unlockAudio());
-    playLeaderboardPing();
-  }, []);
+    playLeaderboardPing(auditionVolume);
+  }, [auditionVolume]);
 
   // Keyboard shortcuts: 1/2/3 timeframe, T theme, / focus search, Esc clear search.
   useEffect(() => {
@@ -167,7 +162,7 @@ export function Scanner() {
     timeframe: board.tf,
     minVolume: board.minVol,
     live: snap.status === "CONNECTED",
-    pingEnabled: ping === "on",
+    volume,
     isDrawerOpen: Boolean(inspect),
     resyncing,
     lastTickAt: snap.lastTickAt,
@@ -204,8 +199,6 @@ export function Scanner() {
         onQuery={setQuery}
         theme={theme}
         onTheme={setTheme}
-        pingOn={ping === "on"}
-        onPing={onPing}
         onTestPing={onTestPing}
         onOpenContract={setInspect}
         focused={inspect !== null}
@@ -230,7 +223,7 @@ export function Scanner() {
           paused={inspect !== null}
           loading={loading}
           selectedSymbol={inspect}
-          onSelect={setInspect}
+          onSelectContract={setInspect}
         />
         <LeaderboardTable
           title="Top Losers"
@@ -243,7 +236,7 @@ export function Scanner() {
           paused={inspect !== null}
           loading={loading}
           selectedSymbol={inspect}
-          onSelect={setInspect}
+          onSelectContract={setInspect}
         />
       </main>
 
@@ -253,7 +246,7 @@ export function Scanner() {
         tracked={snap.tracked}
         lastTickAt={snap.lastTickAt}
         syncedAt={snap.bootstrapAt}
-        audioLocked={ping === "on" && !audioReady}
+        audioLocked={volume > 0 && !audioReady}
       />
 
       {/* Keyed by symbol: switching contracts tears down one feed (sending unsubs) and starts the next. */}
