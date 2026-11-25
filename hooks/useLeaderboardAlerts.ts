@@ -11,7 +11,7 @@ export const NEW_BADGE_MS = 15_000;
 export const CHIME_COOLDOWN_MS = 1_500;
 /** After the drawer closes, ranking frames re-seed silently for this long (plus any catch-up sync). */
 export const RESUME_SETTLE_MS = 3_000;
-/** Extra silent re-seed time after a catch-up /api/scanner sync lands. */
+/** Extra silent re-seed time after a catch-up /api/scanner sync lands, or after the first fresh tick frame. */
 export const RESYNC_TAIL_MS = 1_500;
 
 interface Options {
@@ -29,6 +29,8 @@ interface Options {
   isDrawerOpen: boolean;
   /** Catch-up /api/scanner sync after closing the drawer is in flight. */
   resyncing?: boolean;
+  /** Time of the newest live ticker batch in the rankings (scanner store). */
+  lastTickAt?: number | null;
 }
 
 export interface LeaderboardAlerts {
@@ -61,6 +63,11 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
   const muted = useRef(o.isDrawerOpen);
   const resyncing = useRef(Boolean(o.resyncing));
   const settleUntil = useRef(0);
+  /** When the drawer last closed. Until rankings include ticks newer than this, they're a stale restore. */
+  const closedAt = useRef(0);
+  /** True from a drawer close until the first ranking frame built from post-close ticks. */
+  const awaitingFresh = useRef(false);
+  const lastTickAt = useRef<number | null>(o.lastTickAt ?? null);
   const [state, setState] = useState<LeaderboardAlerts>(EMPTY);
 
   // Declared before the evaluation effect, so a commit that opens the drawer updates the
@@ -69,7 +76,11 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
     pingEnabled.current = o.pingEnabled;
     // Drawer just closed: the next ranking frames are a restore of stale boards followed by
     // fresh ticks and a catch-up sync. They re-seed silently instead of chiming late.
-    if (muted.current && !o.isDrawerOpen) settleUntil.current = Date.now() + RESUME_SETTLE_MS;
+    if (muted.current && !o.isDrawerOpen) {
+      closedAt.current = Date.now();
+      settleUntil.current = closedAt.current + RESUME_SETTLE_MS;
+      awaitingFresh.current = true;
+    }
     // The catch-up sync's own snapshot lands in the same commit that clears `resyncing`, so keep
     // re-seeding silently for a short tail after it ends: the catch-up frame and the first
     // ticker batches after it are part of the restore, not new Top 10 entries.
@@ -78,11 +89,12 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
     }
     muted.current = o.isDrawerOpen;
     resyncing.current = Boolean(o.resyncing);
+    lastTickAt.current = o.lastTickAt ?? null;
     if (o.isDrawerOpen && pendingChime.current) {
       clearTimeout(pendingChime.current);
       pendingChime.current = null;
     }
-  }, [o.pingEnabled, o.isDrawerOpen, o.resyncing]);
+  }, [o.pingEnabled, o.isDrawerOpen, o.resyncing, o.lastTickAt]);
 
   useEffect(
     () => () => {
@@ -93,6 +105,17 @@ export function useLeaderboardAlerts(o: Options): LeaderboardAlerts {
 
   useEffect(() => {
     engine.current ??= new LeaderboardAlertEngine();
+    // After a close, the 3s window alone isn't enough when the market-wide stream resumes slowly:
+    // keep re-seeding until a ranking frame contains ticks received AFTER the close, then add a
+    // short tail. A slow resume can never be compared against stale pre-close rankings.
+    if (!muted.current && awaitingFresh.current) {
+      if ((lastTickAt.current ?? 0) > closedAt.current) {
+        awaitingFresh.current = false; // first fresh frame: re-seed it, plus a short tail after
+        settleUntil.current = Math.max(settleUntil.current, Date.now() + RESYNC_TAIL_MS);
+      } else {
+        settleUntil.current = Math.max(settleUntil.current, Date.now() + 1); // still a stale restore
+      }
+    }
     if (!muted.current && (resyncing.current || Date.now() < settleUntil.current)) {
       if (o.gainers.length || o.losers.length) engine.current.reseed(o.gainers, o.losers);
       return;

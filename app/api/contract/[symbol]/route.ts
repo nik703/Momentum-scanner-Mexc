@@ -38,6 +38,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ symbol: string
       return fail(404, { error: "Contract not found", detail: `${norm.symbol} is not an active MEXC contract` }, CACHE_404);
     }
     const detail = err instanceof Error ? err.message : "Upstream error";
+    console.warn(`[api/contract] ${norm.symbol}: upstream failed: ${detail}`);
     return fail(502, { error: "MEXC upstream unavailable", detail });
   }
 }

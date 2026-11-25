@@ -4,6 +4,7 @@ import {
   parseBybitLiquidation,
   parseOkxInstruments,
   parseOkxLiquidation,
+  liquidationVwap,
   totalsSince,
   WINDOW_15M_MS,
   type Exchange,
@@ -41,6 +42,12 @@ export interface LiquidationSnapshot {
   window15m: LiqTotals;
   /** Rolling trailing-15-minute events, oldest first (chart overlay). */
   windowEvents: readonly LiqEvent[];
+  /** Trailing-15m USD of SHORT liquidations (forced buys, bullish squeeze pressure). */
+  shortLiqUsd15m: number;
+  /** Trailing-15m USD of LONG liquidations (forced sells, bearish cascade pressure). */
+  longLiqUsd15m: number;
+  /** USD-weighted average fill/bankruptcy price of trailing-15m liquidations; 0 when none. */
+  liqVwap15m: number;
   /** Totals since the drawer opened. */
   session: LiqTotals;
 }
@@ -291,12 +298,17 @@ export class LiquidationFeed {
   }
 
   private build(): LiquidationSnapshot {
+    const cutoff = Date.now() - WINDOW_15M_MS;
+    const totals = totalsSince(this.window, cutoff);
     return {
+      shortLiqUsd15m: totals.shortUsd,
+      longLiqUsd15m: totals.longUsd,
+      liqVwap15m: liquidationVwap(this.window, cutoff),
       base: this.base,
       status: this.status,
       notes: this.notes,
       tape: this.tape.slice(),
-      window15m: totalsSince(this.window, Date.now() - WINDOW_15M_MS),
+      window15m: totals,
       windowEvents: this.window.slice(),
       session: { ...this.session },
     };

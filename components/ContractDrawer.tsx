@@ -12,7 +12,7 @@ import {
 import { useContractFeed } from "@/hooks/useContractFeed";
 import { useCrossExchangeLiquidations } from "@/hooks/useCrossExchangeLiquidations";
 import { playLongLiqPing, playShortLiqPing, unlockAudio } from "@/lib/audio";
-import { calculateBiasScore } from "@/lib/biasScore";
+import { calculateBiasScore, type BiasDeal } from "@/lib/biasScore";
 import type { ContractSnapshot } from "@/lib/contractFeed";
 import { fmtPct, fmtUsd1, makePriceFormatter } from "@/lib/format";
 import type { ContractTicker } from "@/lib/types";
@@ -291,14 +291,33 @@ function InspectorBody({
   });
   const [tf, setTf] = useState<ChartTimeframe>("1M");
 
+  // Rolling 15-minute deal buffer for this contract (REST history + live push.deal, intent fields
+  // kept). The window end is the newest known event, not Date.now(), so render stays pure.
+  const deals15m = useMemo(() => {
+    const lastDeal = feed.deals.length ? feed.deals[feed.deals.length - 1].t : 0;
+    const lastCandle = feed.min1.length ? feed.min1[feed.min1.length - 1].t + 59_999 : 0;
+    const from = Math.max(lastDeal, lastCandle) - 900_000;
+    const out: BiasDeal[] = [];
+    for (const d of feed.deals) {
+      if (d.t >= from) out.push({ price: d.p, vol: d.v, side: d.T === 2 ? 2 : 1, openFlag: d.O, timestampMs: d.t });
+    }
+    return out;
+  }, [feed.deals, feed.min1]);
+
+  const latestPrice = feed.ticker?.lastPrice ?? feed.min1[feed.min1.length - 1]?.c ?? 0;
+  const amount24 = feed.ticker?.amount24 ?? 0;
   const bias = useMemo(
     () =>
       calculateBiasScore({
         candles: feed.min1,
-        longLiqUsd15m: liqs.window15m.longUsd,
-        shortLiqUsd15m: liqs.window15m.shortUsd,
+        deals: deals15m,
+        latestPrice,
+        amount24,
+        shortLiqUsd15m: liqs.shortLiqUsd15m,
+        longLiqUsd15m: liqs.longLiqUsd15m,
+        liqVwap15m: liqs.liqVwap15m,
       }),
-    [feed.min1, liqs.window15m.longUsd, liqs.window15m.shortUsd],
+    [feed.min1, deals15m, latestPrice, amount24, liqs.shortLiqUsd15m, liqs.longLiqUsd15m, liqs.liqVwap15m],
   );
 
   // Same decimals as the price strip, so the watermark matches the headline price exactly.

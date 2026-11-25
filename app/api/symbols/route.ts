@@ -13,6 +13,7 @@ export async function GET() {
       headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" },
     });
   } catch (err) {
+    console.warn(`[api/symbols] upstream failed: ${err instanceof Error ? err.message : String(err)}`);
     const body: ApiError = {
       error: "MEXC upstream unavailable",
       detail: err instanceof Error ? err.message : undefined,

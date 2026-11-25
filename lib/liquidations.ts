@@ -202,6 +202,18 @@ export interface LiqTotals {
   count: number;
 }
 
+/** USD-weighted average fill price of events at/after `since`; 0 when there are none. */
+export function liquidationVwap(events: readonly LiqEvent[], since: number): number {
+  let pv = 0;
+  let v = 0;
+  for (const e of events) {
+    if (e.ts < since || !(e.usd > 0) || !(e.price > 0)) continue;
+    pv += e.price * e.usd;
+    v += e.usd;
+  }
+  return v > 0 ? pv / v : 0;
+}
+
 export function totalsSince(events: readonly LiqEvent[], since: number): LiqTotals {
   let longUsd = 0;
   let shortUsd = 0;

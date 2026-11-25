@@ -17,7 +17,8 @@ import {
   resolveOffset,
   zoomBars,
 } from "../lib/chartViewport.ts";
-import { calculateBiasScore, type BiasResult } from "../lib/biasScore.ts";
+import { calculateBiasScore, classifyRegime, type BiasDeal, type BiasResult } from "../lib/biasScore.ts";
+import { biasSegments } from "../components/DirectionalBiasBar.tsx";
 import {
   buildDisplayCandles,
   mergeMin1,
@@ -60,7 +61,7 @@ function check(name: string, fn: () => void) {
   }
 }
 const finiteResult = (r: BiasResult) => {
-  for (const [k, v] of Object.entries(r)) {
+  for (const [k, v] of [...Object.entries(r), ...Object.entries(r.breakdown)]) {
     if (typeof v === "number") assert.ok(Number.isFinite(v), `${k} is not finite: ${v}`);
   }
 };
@@ -69,119 +70,130 @@ const finiteResult = (r: BiasResult) => {
 /* Synthetic Min1 series                                               */
 /* ------------------------------------------------------------------ */
 const T0 = Date.UTC(2026, 10, 21, 12, 0);
-function series(opts: { n?: number; start?: number; drift: number; baseVol: number; recentVol: number; wick?: number }): Candle[] {
-  const n = opts.n ?? 60;
+
+console.log("\n[1] calculateBiasScore: 4-factor orderflow model");
+
+const CS = 0.0001;
+const NOW = T0 + 60 * 60_000 - 1;
+/** 60 Min1 candles (45 quiet, then 15 trending) with turnover consistent with contract size CS. */
+function market(o: { drift: number; baseUsd: number; recentUsd: number; closeLoc?: number }): Candle[] {
   const out: Candle[] = [];
-  let p = opts.start ?? 100;
-  for (let i = 0; i < n; i++) {
-    const recent = i >= n - 15;
-    const o = p;
-    const c = recent ? p * (1 + opts.drift) : p * (1 + (i % 2 ? 0.0004 : -0.0004));
-    const w = opts.wick ?? 0.0002;
-    out.push({
-      t: T0 + i * 60_000,
-      o,
-      c,
-      h: Math.max(o, c) * (1 + w),
-      l: Math.min(o, c) * (1 - w),
-      v: 1000,
-      a: recent ? opts.recentVol : opts.baseVol,
-    });
-    p = c;
+  let p = 60_000;
+  for (let i = 0; i < 60; i++) {
+    const recent = i >= 45;
+    const open = p;
+    const close = recent ? p * (1 + o.drift) : p * (1 + (i % 2 ? 0.0003 : -0.0003));
+    const wick = Math.max(Math.abs(close - open) * 0.4, p * 0.0002);
+    const hi = Math.max(open, close) + (recent && o.drift > 0 ? wick * (1 - (o.closeLoc ?? 0.8)) : wick);
+    const lo = Math.min(open, close) - (recent && o.drift < 0 ? wick * (1 - (o.closeLoc ?? 0.8)) : wick);
+    const a = recent ? o.recentUsd : o.baseUsd;
+    out.push({ t: T0 + i * 60_000, o: open, h: hi, l: lo, c: close, v: a / (close * CS), a });
+    p = close;
   }
   return out;
 }
+function tape(candles: Candle[], minutes: number, buyShare: number, openFlag: number, usdPerMin: number): BiasDeal[] {
+  const deals: BiasDeal[] = [];
+  for (const c of candles.slice(-minutes)) {
+    for (let k = 0; k < 20; k++) {
+      deals.push({ price: c.c, vol: usdPerMin / 20 / (c.c * CS), side: k < Math.round(20 * buyShare) ? 1 : 2, openFlag, timestampMs: c.t + k * 2_900 });
+    }
+  }
+  return deals;
+}
+const noLiq = { shortLiqUsd15m: 0, longLiqUsd15m: 0, liqVwap15m: 0 };
 
-console.log("\n[1] calculateBiasScore");
+check("strong bullish trend: net > +30, BULL TREND, contract size derived from candles", () => {
+  const c = market({ drift: 0.002, baseUsd: 4e6, recentUsd: 8e6, closeLoc: 0.9 });
+  const r = calculateBiasScore({ candles: c, deals: tape(c, 15, 0.9, 1, 8e6), latestPrice: c[59].c, amount24: 1e9, shortLiqUsd15m: 300_000, longLiqUsd15m: 0, liqVwap15m: c[52].c, now: NOW });
+  finiteResult(r);
+  assert.ok(r.netScore > 30, `net ${r.netScore}`);
+  assert.equal(r.regime, "BULL TREND");
+  assert.ok(Math.abs(r.breakdown.contractSize - CS) / CS < 1e-9);
+});
 
-check("strong bullish lands in +35..+50", () => {
-  const r = calculateBiasScore({
-    candles: series({ drift: 0.002, baseVol: 50_000, recentVol: 150_000 }),
-    longLiqUsd15m: 10_000,
-    shortLiqUsd15m: 400_000,
+check("bear absorption divergence: price > +8, CVD < -8, BEAR DIVERGENCE (net stays small)", () => {
+  const c = market({ drift: 0.0012, baseUsd: 4e6, recentUsd: 5e6, closeLoc: 0.85 });
+  const r = calculateBiasScore({ candles: c, deals: tape(c, 15, 0.2, 1, 5e6), latestPrice: c[59].c, amount24: 1e9, ...noLiq, now: NOW });
+  finiteResult(r);
+  assert.ok(r.priceScore > 8 && r.cvdScore < -8, JSON.stringify(r));
+  assert.equal(r.regime, "BEAR DIVERGENCE");
+  assert.ok(Math.abs(r.netScore) < 10, "opposing forces cancel in the net, which is why the gauge shows them separately");
+});
+
+check("long flush + reclaim above liq VWAP damps liqScore x0.2 (and the squeeze mirror)", () => {
+  const c = market({ drift: -0.0004, baseUsd: 4e6, recentUsd: 4e6 });
+  const base = { candles: c, deals: tape(c, 15, 0.5, 3, 4e6), amount24: 1e8, shortLiqUsd15m: 0, longLiqUsd15m: 400_000, now: NOW };
+  const below = calculateBiasScore({ ...base, latestPrice: c[59].c, liqVwap15m: c[59].c * 1.002 });
+  const reclaim = calculateBiasScore({ ...base, latestPrice: c[59].c * 1.004, liqVwap15m: c[59].c * 1.002 });
+  assert.equal(below.liqScore, -15);
+  assert.equal(below.regime, "LONG CASCADE");
+  assert.equal(reclaim.liqScore, -3);
+  assert.ok(reclaim.breakdown.liqDamped);
+  const rej = calculateBiasScore({ ...base, shortLiqUsd15m: 400_000, longLiqUsd15m: 0, latestPrice: c[59].c, liqVwap15m: c[59].c * 1.01 });
+  assert.equal(rej.liqScore, 3);
+});
+
+check("liquidity floor: $25k of liqs on a $1B/24h contract is damped by the $500k floor", () => {
+  const c = market({ drift: 0, baseUsd: 1e6, recentUsd: 1e6 });
+  const r = calculateBiasScore({ candles: c, deals: [], latestPrice: c[59].c, amount24: 1e9, shortLiqUsd15m: 25_000, longLiqUsd15m: 0, liqVwap15m: 0, now: NOW });
+  assert.equal(r.breakdown.scaleFloor, 500_000);
+  assert.equal(r.liqScore, 0.8); // 15 × 25k / 500k = 0.75 -> 0.8
+});
+
+check("cold start: deals cover only 2 min -> the 13 earlier minutes are backfilled from candles", () => {
+  const c = market({ drift: 0.0015, baseUsd: 4e6, recentUsd: 6e6, closeLoc: 0.9 });
+  const r = calculateBiasScore({ candles: c, deals: tape(c, 2, 0.9, 1, 6e6), latestPrice: c[59].c, amount24: 1e9, ...noLiq, now: NOW });
+  assert.equal(r.breakdown.backfilledCandles, 13);
+  assert.ok(Math.abs(r.breakdown.total15mUsd - 15 * 6e6) / (15 * 6e6) < 1e-9, "15 minutes of turnover covered");
+  assert.ok(r.cvdScore > 10, `backfilled up-closes are bullish, got ${r.cvdScore}`);
+});
+
+check("OI intent: opening buys outweigh closing buys", () => {
+  const c = market({ drift: 0, baseUsd: 4e6, recentUsd: 4e6 });
+  const opens = calculateBiasScore({ candles: c, deals: tape(c, 15, 0.6, 1, 4e6), latestPrice: c[59].c, amount24: 1e9, ...noLiq, now: NOW });
+  const closes = calculateBiasScore({ candles: c, deals: tape(c, 15, 0.6, 2, 4e6), latestPrice: c[59].c, amount24: 1e9, ...noLiq, now: NOW });
+  assert.ok(opens.cvdScore > closes.cvdScore && closes.cvdScore > 0, `${opens.cvdScore} vs ${closes.cvdScore}`);
+});
+
+check("zero volume / no deals / fully empty: 0.0 CHOP, no NaN or Infinity (zero-volume VWAP + flat-CLV guards)", () => {
+  const flat: Candle[] = Array.from({ length: 60 }, (_, i) => ({ t: T0 + i * 60_000, o: 5, h: 5, l: 5, c: 5, v: 0, a: 0 }));
+  const r = calculateBiasScore({ candles: flat, deals: [], latestPrice: 5, amount24: 0, ...noLiq, now: NOW });
+  finiteResult(r);
+  assert.deepEqual([r.netScore, r.cvdScore, r.priceScore, r.liqScore, r.regime], [0, 0, 0, 0, "CHOP"]);
+  assert.ok(!Object.is(r.netScore, -0));
+  const e = calculateBiasScore({ candles: [], deals: [], latestPrice: 0, amount24: 0, ...noLiq });
+  finiteResult(e);
+  assert.deepEqual([e.netScore, e.regime], [0, "CHOP"]);
+  const g = calculateBiasScore({
+    candles: [{ t: T0, o: Number.NaN, h: 1, l: 1, c: 1, v: 1, a: 1 }], deals: [{ price: Number.NaN, vol: 1, side: 1, openFlag: 1, timestampMs: T0 }],
+    latestPrice: Number.POSITIVE_INFINITY, amount24: Number.NaN, shortLiqUsd15m: Number.NaN, longLiqUsd15m: Number.POSITIVE_INFINITY, liqVwap15m: Number.NaN,
   });
-  finiteResult(r);
-  console.log(`      -> ${JSON.stringify(r)}`);
-  assert.ok(r.total >= 35 && r.total <= 50, `total ${r.total}`);
-  assert.equal(r.label, "BULLISH");
-  assert.ok(r.price > 0 && r.price <= 20 && r.volume > 0 && r.volume <= 15 && r.liquidation > 0 && r.liquidation <= 15);
+  finiteResult(g);
 });
 
-check("strong bearish lands in -50..-35", () => {
-  const r = calculateBiasScore({
-    candles: series({ drift: -0.002, baseVol: 50_000, recentVol: 150_000 }),
-    longLiqUsd15m: 400_000,
-    shortLiqUsd15m: 10_000,
-  });
-  finiteResult(r);
-  console.log(`      -> ${JSON.stringify(r)}`);
-  assert.ok(r.total <= -35 && r.total >= -50, `total ${r.total}`);
-  assert.equal(r.label, "BEARISH");
+check("regime priority order", () => {
+  assert.equal(classifyRegime(30, 10, 6, 12), "SHORT SQUEEZE");
+  assert.equal(classifyRegime(-30, -10, -6, -12), "LONG CASCADE");
+  assert.equal(classifyRegime(2, -8, 8, 2), "BEAR DIVERGENCE");
+  assert.equal(classifyRegime(-2, 8, -8, 2), "BULL DIVERGENCE");
+  assert.equal(classifyRegime(12, 1, 1, 10), "BULL TREND");
+  assert.equal(classifyRegime(-12, -1, -1, -10), "BEAR TREND");
+  assert.equal(classifyRegime(11.9, 6, 5.9, 0), "CHOP");
 });
 
-check("perfectly flat market is exactly 0.0 NEUTRAL (zero-range CLV guard)", () => {
-  const flat: Candle[] = Array.from({ length: 60 }, (_, i) => ({ t: T0 + i * 60_000, o: 5, h: 5, l: 5, c: 5, v: 10, a: 1_000 }));
-  const r = calculateBiasScore({ candles: flat, longLiqUsd15m: 0, shortLiqUsd15m: 0 });
-  finiteResult(r);
-  assert.deepEqual([r.total, r.price, r.volume, r.liquidation, r.label], [0, 0, 0, 0, "NEUTRAL"]);
-  assert.ok(!Object.is(r.total, -0), "total must not be -0 (would render as -0.0)");
+check("net = rounded sum of rounded components, clamped to ±50", () => {
+  const c = market({ drift: 0.0007, baseUsd: 3e6, recentUsd: 3.5e6 });
+  const r = calculateBiasScore({ candles: c, deals: tape(c, 15, 0.55, 3, 3.5e6), latestPrice: c[59].c, amount24: 5e8, shortLiqUsd15m: 2e4, longLiqUsd15m: 9e4, liqVwap15m: c[50].c, now: NOW });
+  assert.equal(r.netScore, Number((r.cvdScore + r.priceScore + r.liqScore).toFixed(1)));
 });
 
-check("empty input is 0.0 with no NaN/Infinity", () => {
-  const r = calculateBiasScore({ candles: [], longLiqUsd15m: 0, shortLiqUsd15m: 0 });
-  finiteResult(r);
-  assert.equal(r.total, 0);
-  assert.equal(r.sampleSize, 0);
-});
-
-check("zero-volume candles: volume component 0, still finite", () => {
-  const c = series({ drift: 0.001, baseVol: 0, recentVol: 0 });
-  const r = calculateBiasScore({ candles: c, longLiqUsd15m: 0, shortLiqUsd15m: 0 });
-  finiteResult(r);
-  assert.equal(r.volume, 0);
-});
-
-check("zero baseline volume with live volume: surge capped, finite", () => {
-  const r = calculateBiasScore({ candles: series({ drift: 0.001, baseVol: 0, recentVol: 10_000 }), longLiqUsd15m: 0, shortLiqUsd15m: 0 });
-  finiteResult(r);
-  assert.ok(r.volume <= 15);
-});
-
-check("garbage inputs (NaN/Infinity/negative) never leak NaN", () => {
-  const bad: Candle[] = [
-    { t: T0, o: Number.NaN, h: 1, l: 1, c: 1, v: 1, a: 1 },
-    { t: T0 + 60_000, o: 1, h: Number.POSITIVE_INFINITY, l: 1, c: 1, v: 1, a: 1 },
-    { t: T0 + 120_000, o: 0, h: 0, l: 0, c: 0, v: 0, a: 0 },
-    { t: T0 + 180_000, o: 2, h: 2.1, l: 1.9, c: 2.05, v: 5, a: Number.NaN },
-  ];
-  const r = calculateBiasScore({ candles: bad, longLiqUsd15m: Number.NaN, shortLiqUsd15m: Number.POSITIVE_INFINITY });
-  finiteResult(r);
-});
-
-check("short history (5 candles, no baseline) works", () => {
-  const r = calculateBiasScore({ candles: series({ n: 5, drift: 0.003, baseVol: 1, recentVol: 1 }), longLiqUsd15m: 0, shortLiqUsd15m: 0 });
-  finiteResult(r);
-  assert.equal(r.sampleSize, 5);
-  assert.ok(r.total > 0);
-});
-
-check("dust liquidations are damped by the $25k floor", () => {
-  const r = calculateBiasScore({ candles: [], longLiqUsd15m: 0, shortLiqUsd15m: 2_500 });
-  assert.equal(r.liquidation, 1.5); // 2.5k / 25k × 15
-});
-
-check("component clamps hold at the extremes", () => {
-  const r = calculateBiasScore({
-    candles: series({ drift: 0.05, baseVol: 1, recentVol: 1e9 }),
-    longLiqUsd15m: 0,
-    shortLiqUsd15m: 1e12,
-  });
-  assert.ok(r.price <= 20 && r.volume <= 15 && r.liquidation <= 15 && r.total <= 50);
-});
-
-check("total equals the rounded sum of the components", () => {
-  const r = calculateBiasScore({ candles: series({ drift: 0.0007, baseVol: 9e4, recentVol: 7e4 }), longLiqUsd15m: 3e4, shortLiqUsd15m: 1e4 });
-  assert.equal(r.total, Number((r.price + r.volume + r.liquidation).toFixed(1)));
+check("gauge segments: positives stack right, negatives left, in CVD -> VWAP -> LIQ order", () => {
+  const { pos, neg } = biasSegments(14.8, -8.6, 5);
+  assert.deepEqual(pos.map((x) => [x.factor, x.offset, x.width]), [["cvd", 0, 14.8], ["liq", 14.8, 5]]);
+  assert.deepEqual(neg.map((x) => [x.factor, x.offset, x.width]), [["price", 0, 8.6]]);
+  const full = biasSegments(20, 15, 15);
+  assert.equal(full.pos.reduce((s, x) => s + x.width, 0), 50);
 });
 
 /* ------------------------------------------------------------------ */
@@ -345,12 +357,12 @@ check("10S buckets: trades across several 10-second boundaries -> exact OHLCV", 
   const b = new TradeCandleBuilder(SEC10_MS, SEC10_KEEP, 0.1);
   const t0 = 1_795_350_000_000; // a 10s boundary
   const trades = [
-    { p: 70.0, v: 10, T: 1, t: t0 + 1_200 },
-    { p: 70.4, v: 5, T: 1, t: t0 + 4_000 },
-    { p: 69.9, v: 2, T: 2, t: t0 + 9_999 }, // last ms of bucket 0
-    { p: 70.1, v: 3, T: 1, t: t0 + 10_000 }, // first ms of bucket 1
-    { p: 70.6, v: 1, T: 1, t: t0 + 35_500 }, // bucket 3 (bucket 2 is quiet)
-    { p: 70.2, v: 4, T: 2, t: t0 + 39_000 },
+    { p: 70.0, v: 10, T: 1, O: 3, t: t0 + 1_200 },
+    { p: 70.4, v: 5, T: 1, O: 3, t: t0 + 4_000 },
+    { p: 69.9, v: 2, T: 2, O: 3, t: t0 + 9_999 }, // last ms of bucket 0
+    { p: 70.1, v: 3, T: 1, O: 3, t: t0 + 10_000 }, // first ms of bucket 1
+    { p: 70.6, v: 1, T: 1, O: 3, t: t0 + 35_500 }, // bucket 3 (bucket 2 is quiet)
+    { p: 70.2, v: 4, T: 2, O: 3, t: t0 + 39_000 },
   ];
   for (const tr of trades) b.addTrade(tr);
   const s = b.series;
@@ -372,13 +384,13 @@ check("10S buckets: trades across several 10-second boundaries -> exact OHLCV", 
 
 check("normalizeDeals: newest-first REST -> oldest-first, sides mapped, junk dropped", () => {
   const out = normalizeDeals([
-    { p: 2, v: 1, T: 2, t: 2000, i: "b" },
+    { p: 2, v: 1, T: 2, O: 1, t: 2000, i: "b" },
     { p: "x", v: 1, T: 1, t: 1500 },
     { p: 1, v: 3, T: 1, t: 1000, i: 7 },
   ]);
   assert.deepEqual(out, [
-    { id: "7", price: 1, vol: 3, side: "buy", timestampMs: 1000 },
-    { id: "b", price: 2, vol: 1, side: "sell", timestampMs: 2000 },
+    { id: "7", price: 1, vol: 3, side: 1, openFlag: 3, timestampMs: 1000 },
+    { id: "b", price: 2, vol: 1, side: 2, openFlag: 1, timestampMs: 2000 },
   ]);
   assert.deepEqual(normalizeDeals(null), []);
 });

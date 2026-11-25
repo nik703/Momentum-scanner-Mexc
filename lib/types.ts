@@ -99,8 +99,10 @@ export interface ContractTrade {
   price: number;
   /** Quantity in contracts. */
   vol: number;
-  /** Taker side. */
-  side: "buy" | "sell";
+  /** MEXC `T`: 1 = aggressive taker buy, 2 = aggressive taker sell. */
+  side: 1 | 2;
+  /** MEXC `O`: 1 = opening a new position, 2 = closing an existing one, 3 = both/neutral (default). */
+  openFlag: number;
   timestampMs: number;
 }
 

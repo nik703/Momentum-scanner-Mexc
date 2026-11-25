@@ -39,6 +39,8 @@ export interface ContractSnapshot {
   sec1: readonly Candle[];
   ws: SocketStatus;
   lastTradeAt: number | null;
+  /** REST history + live trades (id-deduplicated, time-ordered, bounded). The drawer windows it to 15m. */
+  deals: readonly Trade[];
 }
 
 type Obj = Record<string, unknown>;
@@ -88,6 +90,7 @@ export class ContractFeed {
       sec1: [],
       ws: "connecting",
       lastTradeAt: null,
+      deals: [],
     };
   }
 
@@ -199,7 +202,8 @@ export class ContractFeed {
     const history: Trade[] = (detail.trades ?? []).map((t) => ({
       p: t.price,
       v: t.vol,
-      T: t.side === "sell" ? 2 : 1,
+      T: t.side,
+      O: t.openFlag,
       t: t.timestampMs,
       id: t.id,
     }));
@@ -237,6 +241,7 @@ export class ContractFeed {
       min1: this.min1.slice(),
       sec10: this.sec10.series.slice(),
       sec1: this.sec1.series.slice(),
+      deals: this.tradeLog.slice(),
     };
     this.emit();
   }
@@ -338,6 +343,7 @@ export class ContractFeed {
       min1: this.min1.slice(),
       sec10: this.sec10.series.slice(),
       sec1: this.sec1.series.slice(),
+      deals: this.tradeLog.slice(),
     };
     this.emit();
   }

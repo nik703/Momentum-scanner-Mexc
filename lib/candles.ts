@@ -37,6 +37,8 @@ export interface Trade {
   v: number;
   /** 1 = taker buy, 2 = taker sell. */
   T: number;
+  /** Open-interest intent: 1 = open, 2 = close, 3 = both/neutral (default when omitted). */
+  O: number;
   /** Trade time, epoch ms. */
   t: number;
   /** MEXC trade id, when known (used for dedupe). */
@@ -54,7 +56,8 @@ export function parseDealPush(data: unknown): Trade[] {
     const t = n(d.t);
     if (p === null || v === null || t === null || p <= 0 || v < 0) continue;
     const id = typeof d.i === "string" || typeof d.i === "number" ? String(d.i) : undefined;
-    out.push({ p, v, T: n(d.T) ?? 0, t, id });
+    const o = n(d.O);
+    out.push({ p, v, T: n(d.T) ?? 0, O: o === 1 || o === 2 || o === 3 ? o : 3, t, id });
   }
   return out;
 }

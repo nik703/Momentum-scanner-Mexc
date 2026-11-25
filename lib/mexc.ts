@@ -195,6 +195,8 @@ interface RawDeal {
   v: number;
   /** 1 = taker buy, 2 = taker sell */
   T: number;
+  /** 1 = open, 2 = close, 3 = both/neutral */
+  O?: number;
   t: number;
   i?: string | number;
 }
@@ -213,7 +215,8 @@ export function normalizeDeals(raw: unknown): ContractTrade[] {
       id: d.i !== undefined ? String(d.i) : `${ts}:${price}:${vol}`,
       price,
       vol,
-      side: d.T === 2 ? "sell" : "buy",
+      side: d.T === 2 ? 2 : 1,
+      openFlag: d.O === 1 || d.O === 2 || d.O === 3 ? d.O : 3,
       timestampMs: ts,
     });
   }

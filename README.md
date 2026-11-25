@@ -136,7 +136,7 @@ Click any leaderboard row, or look up **any** active MEXC USDT-M contract from t
 | Live contract feed | `lib/contractFeed.ts` | `sub.kline` (Min1), `sub.deal` (`compress:false`) and `sub.ticker`. Sends `unsub.*` on symbol change or close. |
 | Chart | `components/MicroChart.tsx`, `lib/chartViewport.ts` | Plain `<canvas>`, backing store scaled by DPR, crosshair with OHLCV readout. **1M** = 60 live Min1 candles. **10S** = 10-second candles (up to 90, 15 minutes). **1S** = 1-second candles (up to 180, 3 minutes). Both come from the last 100 REST trades plus live `sub.deal` trades (`compress:false, reduce:false`), deduplicated by trade id. The **Smooth** toggle (`mexc_chart_smooth`, default on) applies to 10S and 1S. It anchors each candle to the previous close so there are no gaps, applies Heikin-Ashi smoothing, and draws bodies at least 3px tall. The live price line, axis tags and OHLCV readout always show the exact market fills, and the readout shows a `SMOOTH` tag while it is on. Zoom shows 10 bars up to the buffer size (60 on 1M, 90 on 10S, 180 on 1S), default 36, using the wheel, pinch, `−`/`+`/`100%` buttons or the `+`/`-` keys. Drag, horizontal scroll or the arrow keys pan into history, and `Live ⇥` or `End` returns to live. In follow mode the newest bar stays in the rightmost slot, 8px from the price scale. While panned, the view stays on the same bars as new ones arrive. The price range and volume scale come from the visible bars only. The **BG Price** watermark (`mexc_chart_bg_price`, default on) is drawn on the canvas after the gridlines and before the volume, candles, price line and crosshair. |
 | Liquidations | `hooks/useCrossExchangeLiquidations.ts`, `lib/liquidations.ts`, `lib/liquidationFeed.ts` | Binance `!forceOrder@arr`, Bybit `allLiquidation.*`, OKX `liquidation-orders`. Rolling 15-minute window plus a session tape. |
-| Bias | `lib/biasScore.ts`, `components/DirectionalBiasBar.tsx` | Score from −50 to +50: price action ±20, volume pressure ±15, liquidation imbalance ±15. |
+| Bias | `lib/biasScore.ts`, `components/DirectionalBiasBar.tsx` | A 4-factor orderflow model scored from −50 to +50, with a regime label and a tug-of-war gauge (see below). |
 
 Where this deliberately differs from the original spec, following exchange documentation and live data:
 
@@ -148,6 +148,25 @@ Where this deliberately differs from the original spec, following exchange docum
 - **One shared Binance connection.** The all-market stream is reused when you switch contracts and closes 1.5s after the drawer closes.
 - **Binance silence warning.** Binance blocks some regions, including the US (HTTP 451). There the socket still opens but sends nothing, so 120s of silence turns the BN dot red with an explanatory tooltip.
 - **No sockets for unknown contracts.** A 404 contract never opens liquidation sockets, and its MEXC socket is closed as soon as the 404 arrives.
+
+## 15M flow bias
+
+`calculateBiasScore` is pure and deterministic. It combines three factors, each fed from data the drawer already streams (no extra requests):
+
+| Factor | Range | Inputs |
+| --- | --- | --- |
+| **CVD** (taker flow) | ±20 | Trailing-15m trades, kept with their MEXC side (`T`: 1 buy, 2 sell) and open/close intent (`O`). Notional = price × quantity × contract size, with the size derived from the candles as the median of turnover / (contracts × close). Trades that open positions count ×1.25 and trades that close them count ×0.75. Minutes before the first known trade are backfilled from intrabar close-location delta. The result is multiplied by a 15m-vs-60m volume pace factor, clamped to 0.65–1.5. |
+| **VWAP** (price) | ±15 | `15·tanh(0.45·netZ + 0.35·vwapZ + 0.30·CLV)`. netZ and vwapZ are the net 15m move and the distance from the 15m VWAP, both divided by 15-minute ATR. |
+| **LIQ** (liquidations) | ±15 | `15·(short − long) / max(short + long, max($5k, 0.05% of 24h turnover))`. Damped ×0.2 when price has reclaimed above the liquidation VWAP after a long flush, or rejected below it after a short squeeze. |
+
+The net score is the sum of the rounded factors. The regime is the first rule that matches, in order: `SHORT SQUEEZE`, `LONG CASCADE`, `BEAR DIVERGENCE`, `BULL DIVERGENCE`, `BULL TREND`, `BEAR TREND`, `CHOP`.
+
+**The gauge** has a center-zero track. Each positive factor stacks rightward from 0 and each negative factor stacks leftward, in CVD → VWAP → LIQ order, with 1 point = 1% of the track width. That keeps opposing forces visible instead of cancelling out: price up while takers sell shows both, plus a `BEAR DIVERGENCE` badge. A 2px needle marks the exact net.
+
+**Two guards beyond the formulas:**
+
+- When the 15m turnover is zero, VWAP is treated as equal to the current price. The `max(Σamount, 1)` floor would otherwise make VWAP 0 and score an untraded market +15 bullish.
+- A perfectly flat 15m range gives CLV = 0. The raw formula gives −1.
 
 ## Settings (⚙)
 

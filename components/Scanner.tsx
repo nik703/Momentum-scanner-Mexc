@@ -170,6 +170,7 @@ export function Scanner() {
     pingEnabled: ping === "on",
     isDrawerOpen: Boolean(inspect),
     resyncing,
+    lastTickAt: snap.lastTickAt,
   });
 
   // Search and row count only change what is shown. Ranks stay the same.
