@@ -1,4 +1,5 @@
 import { ReconnectingSocket, type SocketStatus } from "./reconnectingSocket.ts";
+import { safeJsonParse } from "./sanitize.ts";
 
 /**
  * The app's ONE connection to wss://contract.mexc.com/edge.
@@ -136,16 +137,18 @@ class MexcMultiplexer {
         for (const fn of this.connectedListeners) fn(reconnect);
       },
       onMessage: (raw) => {
-        let msg: unknown;
-        try {
-          msg = JSON.parse(raw);
-        } catch {
-          return;
-        }
+        // Size-capped, prototype-key-stripping parse; undefined for "pong"-style or invalid frames.
+        const msg = safeJsonParse(raw);
         if (typeof msg !== "object" || msg === null || Array.isArray(msg)) return;
         const m = msg as Record<string, unknown>;
-        if (typeof m.channel !== "string") return;
-        for (const fn of this.listeners) fn(m as MexcMessage);
+        if (typeof m.channel !== "string" || m.channel.length > 64) return;
+        for (const fn of this.listeners) {
+          try {
+            fn(m as MexcMessage);
+          } catch {
+            /* one consumer's failure must not starve the others (scanner board vs drawer feed) */
+          }
+        }
       },
       onStatus: (s) => {
         this.status = s;

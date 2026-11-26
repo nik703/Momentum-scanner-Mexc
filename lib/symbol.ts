@@ -2,6 +2,16 @@
 const MULTIPLIER = /^(?:1000000|100000|10000|1000)(?=[A-Z])/;
 const SYMBOL_CHARS = /^[A-Z0-9_]{2,30}$/;
 
+/**
+ * The ONLY form the server accepts in /api/contract/[symbol] and interpolates into MEXC URLs:
+ * 1–20 uppercase letters/digits + "_USDT". No case-folding, no aliases, no percent-decoding.
+ */
+export const CONTRACT_SYMBOL_RE = /^[A-Z0-9]{1,20}_USDT$/;
+
+export function isContractSymbol(s: unknown): s is string {
+  return typeof s === "string" && s.length <= 25 && CONTRACT_SYMBOL_RE.test(s);
+}
+
 export type NormalizedSymbol =
   | { ok: true; symbol: string }
   | { ok: false; reason: "invalid" | "unsupported-quote" };
@@ -13,6 +23,13 @@ export type NormalizedSymbol =
  *   "s#!" -> invalid
  */
 export function normalizeSymbol(input: string): NormalizedSymbol {
+  const r = normalizeLoose(input);
+  // Whatever the input looked like, the result must be the strict server form.
+  return r.ok && !isContractSymbol(r.symbol) ? { ok: false, reason: "invalid" } : r;
+}
+
+function normalizeLoose(input: string): NormalizedSymbol {
+  if (typeof input !== "string" || input.length > 64) return { ok: false, reason: "invalid" };
   const raw = input.trim().toUpperCase().replace(/[-/\s]+/g, "_");
   if (!SYMBOL_CHARS.test(raw)) return { ok: false, reason: "invalid" };
   if (/^[A-Z0-9]+_USDT$/.test(raw)) return { ok: true, symbol: raw };

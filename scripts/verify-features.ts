@@ -8,6 +8,9 @@ import assert from "node:assert/strict";
 import { LeaderboardAlertEngine } from "../lib/alerts.ts";
 import { nextPingSlot, volumeGain } from "../lib/audio.ts";
 import { applyVolSort, nextVolSort } from "../lib/volSort.ts";
+import { LiqRollup } from "../lib/liquidations.ts";
+import { safeJsonParse } from "../lib/sanitize.ts";
+import { isContractSymbol } from "../lib/symbol.ts";
 import {
   anchorFor,
   candleX,
@@ -384,14 +387,16 @@ check("10S buckets: trades across several 10-second boundaries -> exact OHLCV", 
 });
 
 check("normalizeDeals: newest-first REST -> oldest-first, sides mapped, junk dropped", () => {
+  const T0 = Date.UTC(2026, 0, 1);
   const out = normalizeDeals([
-    { p: 2, v: 1, T: 2, O: 1, t: 2000, i: "b" },
-    { p: "x", v: 1, T: 1, t: 1500 },
-    { p: 1, v: 3, T: 1, t: 1000, i: 7 },
+    { p: 2, v: 1, T: 2, O: 1, t: T0 + 2000, i: "b" },
+    { p: "x", v: 1, T: 1, t: T0 + 1500 },
+    { p: 1, v: 3, T: 1, t: 1000, i: "epoch-1970" }, // absurd timestamp: dropped
+    { p: 1, v: 3, T: 1, t: T0 + 1000, i: 7 },
   ]);
   assert.deepEqual(out, [
-    { id: "7", price: 1, vol: 3, side: 1, openFlag: 3, timestampMs: 1000 },
-    { id: "b", price: 2, vol: 1, side: 2, openFlag: 1, timestampMs: 2000 },
+    { id: "7", price: 1, vol: 3, side: 1, openFlag: 3, timestampMs: T0 + 1000 },
+    { id: "b", price: 2, vol: 1, side: 2, openFlag: 1, timestampMs: T0 + 2000 },
   ]);
   assert.deepEqual(normalizeDeals(null), []);
 });
@@ -741,6 +746,46 @@ check("volumeGain: 0/invalid = silent, perceptual curve, capped at 1", () => {
   assert.equal(volumeGain(150), 1);
   assert.equal(volumeGain(50), 0.25);
   assert.ok(volumeGain(42) > volumeGain(41));
+});
+
+console.log("\n[10] Security guards (untrusted frames)");
+check("strict server symbol: canonical only, no aliases / encodings / traversal", () => {
+  for (const ok of ["BTC_USDT", "1000PEPE_USDT", "A_USDT"]) assert.ok(isContractSymbol(ok), ok);
+  for (const bad of ["btc_usdt", "BTCUSDT", "BTC%5FUSDT", "../BTC_USDT", "BTC_USDT ", "BTC_USDT&limit=1", `${"A".repeat(21)}_USDT`, "BTC_USD"]) {
+    assert.ok(!isContractSymbol(bad), bad);
+  }
+});
+check("safeJsonParse: drops __proto__/constructor/prototype, rejects junk and oversized frames", () => {
+  const v = safeJsonParse('{"__proto__":{"p":1},"constructor":{"prototype":{"p":1}},"ok":1}') as Record<string, unknown>;
+  assert.deepEqual(Object.keys(v), ["ok"]);
+  assert.equal(({} as Record<string, unknown>).p, undefined);
+  assert.equal(safeJsonParse("pong"), undefined);
+  assert.equal(safeJsonParse('{"a":1}', 3), undefined);
+});
+check("liquidation parsers: Infinity notional dropped, absurd timestamps re-stamped to receive time", () => {
+  const T = Date.now();
+  assert.equal(parseBybitLiquidation(`{"topic":"allLiquidation.BTCUSDT","data":[{"T":${T},"s":"BTCUSDT","S":"Buy","v":"1e200","p":"1e200"}]}`, "BTC").length, 0);
+  const [e] = parseBinanceForceOrder(`{"e":"forceOrder","E":1,"o":{"s":"BTCUSDT","S":"SELL","q":"1","ap":"60000","T":999999999999999}}`, "BTC");
+  assert.ok(e && e.ts === e.receivedAt, "future ts must not be trusted");
+});
+check("Min1 / trade pushes: far-future or inverted bars rejected (chart can't be frozen)", () => {
+  const T = Date.now();
+  assert.equal(parseKlinePush({ t: 99999999999, o: 2, h: 3, l: 1, c: 2 }), null);
+  assert.equal(parseKlinePush({ t: Math.floor(T / 1000), o: 2, h: -5, l: -9, c: 2 }), null);
+  assert.equal(parseDealPush([{ p: 1, v: 1, T: 1, t: 999999999999999 }]).length, 0);
+  assert.equal(parseDealPush([{ p: 1, v: 1, T: 1, t: T }]).length, 1);
+});
+check("LiqRollup: exact totals + VWAP, prunes by window", () => {
+  const T = Date.now();
+  const r = new LiqRollup();
+  const mk = (side: "LONG" | "SHORT", usd: number, price: number, ts: number): LiqEvent =>
+    ({ id: String(Math.random()), exchange: "BYB", side, instrument: "BTCUSDT", usd, price, ts, receivedAt: ts });
+  r.add(mk("LONG", 100, 10, T - 1000));
+  r.add(mk("SHORT", 300, 20, T));
+  r.add(mk("LONG", 50, 10, T - 20 * 60_000));
+  assert.deepEqual(r.totals(T - 15 * 60_000), { longUsd: 100, shortUsd: 300, count: 2, vwap: (10 * 100 + 20 * 300) / 400 });
+  r.prune(T - 15 * 60_000);
+  assert.equal(r.size, 2);
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

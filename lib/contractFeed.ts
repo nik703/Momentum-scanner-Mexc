@@ -12,13 +12,59 @@ import {
 } from "./candles.ts";
 import { mexcSocket, type MexcMessage } from "./mexcSocket.ts";
 import type { SocketStatus } from "./reconnectingSocket.ts";
+import { MAX_PRICE, saneTs } from "./sanitize.ts";
 import type { ApiError, Candle, ContractDetail, ContractTicker } from "./types.ts";
 
 const FLUSH_MS = 250;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_FETCH_RETRIES = 3;
-/** Raw trades kept for re-bucketing on hydration (bounded; only the last ~15 min matter for 10S). */
-const TRADE_LOG_MAX = 20_000;
+/**
+ * Hard cap on raw trades kept in memory. Trades pushed out of the raw log are not lost to the bias
+ * engine: they are folded into 10-second aggregates (see DealCompactor), so 15-minute CVD stays
+ * exact while memory stays flat during a trade flood.
+ */
+export const MAX_DEALS = 2_000;
+const COMPACT_BUCKET_MS = 10_000;
+/** 16 minutes of 10s buckets × 2 sides × 3 intents, plus slack. */
+const COMPACT_MAX = 600;
+const COMPACT_KEEP_MS = 16 * 60_000;
+
+/**
+ * Lossless-for-CVD aggregation of evicted trades: one pseudo-trade per (10s bucket, side, intent)
+ * whose p·v equals the bucket's summed p·v, so price × vol × contractSize sums exactly.
+ */
+export class DealCompactor {
+  private buckets = new Map<string, { t: number; pv: number; v: number; T: number; O: number }>();
+
+  add(tr: Trade): void {
+    if (!(tr.v > 0) || !(tr.p > 0)) return;
+    const b = Math.floor(tr.t / COMPACT_BUCKET_MS);
+    const key = `${b}:${tr.T}:${tr.O}`;
+    let agg = this.buckets.get(key);
+    if (!agg) {
+      if (this.buckets.size >= COMPACT_MAX) this.buckets.delete(this.buckets.keys().next().value!);
+      this.buckets.set(key, (agg = { t: tr.t, pv: 0, v: 0, T: tr.T, O: tr.O }));
+    }
+    agg.pv += tr.p * tr.v;
+    agg.v += tr.v;
+    if (tr.t < agg.t) agg.t = tr.t;
+  }
+
+  prune(now: number): void {
+    for (const [k, a] of this.buckets) if (a.t < now - COMPACT_KEEP_MS) this.buckets.delete(k);
+  }
+
+  get size(): number {
+    return this.buckets.size;
+  }
+
+  /** Aggregates as trades, oldest first (they all predate the raw log). */
+  trades(): Trade[] {
+    const out: Trade[] = [];
+    for (const a of this.buckets.values()) if (a.v > 0) out.push({ p: a.pv / a.v, v: a.v, T: a.T, O: a.O, t: a.t });
+    return out.sort((x, y) => x.t - y.t);
+  }
+}
 
 export interface FeedError {
   status: number;
@@ -73,6 +119,7 @@ export class ContractFeed {
   /** Every trade seen (REST + live), ascending by arrival; ids dedupe the REST/WS overlap. */
   private tradeLog: Trade[] = [];
   private tradeIds = new Set<string>();
+  private compacted = new DealCompactor();
   private ticker: ContractTicker | null = null;
   private lastTradeAt: number | null = null;
   private dirty = false;
@@ -217,8 +264,9 @@ export class ContractFeed {
       merged.push(t);
     }
     merged.sort((a, b) => a.t - b.t);
-    this.tradeLog = merged.slice(-TRADE_LOG_MAX);
-    this.tradeIds = ids;
+    for (const t of merged.slice(0, Math.max(0, merged.length - MAX_DEALS))) this.compacted.add(t);
+    this.tradeLog = merged.slice(-MAX_DEALS);
+    this.tradeIds = new Set(this.tradeLog.flatMap((t) => (t.id ? [t.id] : [])));
     this.sec10 = new TradeCandleBuilder(SEC10_MS, SEC10_KEEP, detail.contractSize);
     this.sec1 = new TradeCandleBuilder(SEC1_MS, SEC1_KEEP, detail.contractSize);
     const seed = merged[0]?.p ?? base[base.length - 1]?.c ?? detail.ticker.lastPrice;
@@ -241,9 +289,26 @@ export class ContractFeed {
       min1: this.min1.slice(),
       sec10: this.sec10.series.slice(),
       sec1: this.sec1.series.slice(),
-      deals: this.tradeLog.slice(),
+      deals: this.dealsView(),
     };
     this.emit();
+  }
+
+  /** Compacted aggregates (older) + raw trades (newer): what the bias engine consumes. */
+  private dealsView(): Trade[] {
+    return this.compacted.size ? [...this.compacted.trades(), ...this.tradeLog] : this.tradeLog.slice();
+  }
+
+  /** Sizes of every rolling buffer (diagnostics and the flood test). */
+  bufferSizes() {
+    return {
+      deals: this.tradeLog.length,
+      dealIds: this.tradeIds.size,
+      compacted: this.compacted.size,
+      min1: this.min1.length,
+      sec10: this.sec10.series.length,
+      sec1: this.sec1.series.length,
+    };
   }
 
   private onMessage(msg: MexcMessage) {
@@ -279,9 +344,12 @@ export class ContractFeed {
         if (added && this.ticker && newest.t >= this.ticker.timestamp) {
           this.ticker = { ...this.ticker, lastPrice: newest.p, timestamp: newest.t };
         }
-        if (this.tradeLog.length > TRADE_LOG_MAX * 1.25) {
-          const drop = this.tradeLog.splice(0, this.tradeLog.length - TRADE_LOG_MAX);
-          for (const t of drop) if (t.id) this.tradeIds.delete(t.id);
+        if (this.tradeLog.length > MAX_DEALS) {
+          const drop = this.tradeLog.splice(0, this.tradeLog.length - MAX_DEALS);
+          for (const t of drop) {
+            if (t.id) this.tradeIds.delete(t.id);
+            this.compacted.add(t);
+          }
         }
         if (added) this.dirty = true;
         break;
@@ -290,9 +358,15 @@ export class ContractFeed {
         if (!isObj(msg.data)) break;
         const d = msg.data;
         const prev = this.ticker;
+        const POSITIVE = new Set<keyof ContractTicker>(["lastPrice", "fairPrice", "indexPrice", "high24Price", "lower24Price"]);
         const pick = (k: keyof ContractTicker): number | undefined => {
           const v = d[k];
-          return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+          if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
+          // Prices must be positive and plausible; a far-future timestamp would lock lastPrice forever.
+          if (POSITIVE.has(k) && !(v > 0 && v <= MAX_PRICE)) return undefined;
+          if (k === "timestamp" && !saneTs(v)) return undefined;
+          if ((k === "amount24" || k === "volume24" || k === "holdVol") && v < 0) return undefined;
+          return v;
         };
         const next: Partial<ContractTicker> = {};
         for (const k of [
@@ -335,6 +409,7 @@ export class ContractFeed {
 
   private flush() {
     if (!this.dirty) return;
+    this.compacted.prune(Date.now());
     this.dirty = false;
     this.snap = {
       ...this.snap,
@@ -343,7 +418,7 @@ export class ContractFeed {
       min1: this.min1.slice(),
       sec10: this.sec10.series.slice(),
       sec1: this.sec1.series.slice(),
-      deals: this.tradeLog.slice(),
+      deals: this.dealsView(),
     };
     this.emit();
   }

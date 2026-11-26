@@ -508,7 +508,12 @@ export function MicroChart({
     if (frame.current !== null) return;
     frame.current = requestAnimationFrame(() => {
       frame.current = null;
-      drawRef.current();
+      try {
+        drawRef.current();
+      } catch (e) {
+        // A bad frame must not kill the render loop; the next data update redraws from scratch.
+        if (process.env.NODE_ENV !== "production") console.warn("[MicroChart] draw failed", e);
+      }
     });
   }, []);
 

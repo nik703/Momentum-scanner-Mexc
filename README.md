@@ -208,6 +208,69 @@ Liquidations from Binance, Bybit and OKX, both from the rolling 15-minute window
 
 A legend pill appears in the chart corner, and the OHLCV readout adds `L-Liq` / `S-Liq` for any bar that has liquidations.
 
+## Security
+
+**HTTP headers** (`next.config.ts`, every route):
+- A strict CSP:
+  - `default-src 'self'`.
+  - `connect-src` lists only the endpoints the browser actually uses:
+    - `wss://contract.mexc.com`
+    - `wss://fstream.binance.com`
+    - `wss://stream.bybit.com`
+    - `wss://ws.okx.com` (ports 443 and 8443)
+    - `https://www.okx.com`
+  - `'unsafe-inline'` is allowed for scripts and styles, because Next streams inline bootstrap scripts.
+  - `'unsafe-eval'` is allowed only under `next dev`.
+  - `object-src 'none'` and `frame-ancestors 'none'`.
+- `X-Frame-Options: DENY`, `nosniff`, `strict-origin-when-cross-origin`, a locked-down `Permissions-Policy` and a 2-year HSTS with `preload`.
+
+**API routes** (`app/api/*`, `lib/server/*`):
+- **Symbols.**
+  - `/api/contract/[symbol]` accepts only `^[A-Z0-9]{1,20}_USDT$`, exactly as given. It never lowercases, never accepts aliases, and never percent-decodes a second time.
+  - Anything else gets a `400` before any outbound request.
+  - Valid-looking symbols that MEXC doesn't list get a `404` from a cached allowlist of active contracts, so random symbols cost no upstream calls.
+- **No query strings.** Every route rejects them with a `400`, so `?cb=N` cache-busting can't bypass the CDN cache.
+- **Coalescing.**
+  - `/api/scanner` concurrent misses share one in-flight build, and that build is memoized for 10s.
+  - Contract detail is memoized for 2s per symbol, and the symbol list for 60s.
+- **Rate limits.** A per-client token bucket on each instance returns `429` with `Retry-After`.
+- **Outbound fetches** (`lib/server/upstream.ts`):
+  - A 5s `AbortSignal.timeout` that also covers the response body.
+  - Redirects are not followed.
+  - The response must have a JSON `Content-Type`.
+  - The body is streamed with a 4MB cap.
+  - The bootstrap as a whole has a 20s budget, well under the function's `maxDuration`.
+- **Errors.** Error bodies contain only the app's own messages, never stack traces.
+
+**Untrusted exchange data** (`lib/sanitize.ts`, all parsers):
+- **Numbers.**
+  - Prices must be finite and in `(0, 1e9]`.
+  - A notional larger than $100B is dropped. This includes `1e200 × 1e200`.
+  - Timestamps must fall between 2015 and 5 minutes in the future. Liquidations with absurd timestamps are re-stamped with the time they were received.
+  - A future-dated kline or trade can no longer freeze the chart.
+- **Parsing.**
+  - Frames larger than 4MB and binary frames are dropped.
+  - JSON is parsed with `__proto__`, `constructor` and `prototype` keys stripped.
+  - A parser that throws can't stop the frames that follow it, and a crashed listener can't starve the others.
+- **Bounded buffers**, so memory stays flat under a flood of 10k messages a second:
+
+  | Buffer | Cap |
+  | --- | --- |
+  | Liquidations window (`MAX_LIQUIDATIONS`) | 500 |
+  | Liquidation tape | 200 |
+  | Raw trades (`MAX_DEALS`) | 2,000 |
+  | 1S candles (`MAX_1S_CANDLES`) | 180 |
+  | 10S candles | 90 |
+  | Min1 candles | 60 |
+
+  - Liquidation totals stay exact past the cap: they come from per-second buckets.
+  - Trades evicted from the raw log are folded into 10-second aggregates, so 15-minute CVD stays exact.
+- **Storage and rendering.**
+  - Every `localStorage` value is checked against an allowlist when it is read. Corrupt or unexpected values fall back to defaults, and blocked storage falls back to memory.
+  - All exchange strings render as React text or canvas `fillText`. There are no `eval` calls, `new Function` calls or `javascript:` URLs.
+  - The only `dangerouslySetInnerHTML` is the constant pre-paint theme script.
+  - Error boundaries contain render crashes: one around the drawer and one for the whole route (`app/error.tsx`).
+
 ## Keyboard shortcuts
 
 `1` `2` `3` switch the timeframe · `T` toggles the theme · `/` focuses search · `Enter` opens the highlighted contract · `Esc` closes the lookup list, then clears search, then closes the drawer

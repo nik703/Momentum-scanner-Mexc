@@ -1,3 +1,5 @@
+import { MAX_FRAME_CHARS } from "./sanitize.ts";
+
 export type SocketStatus = "connecting" | "open" | "reconnecting" | "error" | "closed";
 
 export interface ReconnectingSocketOptions {
@@ -100,7 +102,13 @@ export class ReconnectingSocket {
     };
     ws.onmessage = (ev: MessageEvent) => {
       this.lastMsgAt = Date.now();
-      if (typeof ev.data === "string") this.opts.onMessage(ev.data);
+      // Text frames only (binary blobs are ignored), and oversized frames are dropped unparsed.
+      if (typeof ev.data !== "string" || ev.data.length > MAX_FRAME_CHARS) return;
+      try {
+        this.opts.onMessage(ev.data);
+      } catch {
+        /* a malformed frame must never escape into the event loop or stop later frames */
+      }
     };
     ws.onerror = () => {
       /* onclose follows */

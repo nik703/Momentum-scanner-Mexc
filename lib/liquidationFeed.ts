@@ -4,8 +4,7 @@ import {
   parseBybitLiquidation,
   parseOkxInstruments,
   parseOkxLiquidation,
-  liquidationVwap,
-  totalsSince,
+  LiqRollup,
   WINDOW_15M_MS,
   type Exchange,
   type LiqEvent,
@@ -22,6 +21,13 @@ const OKX_WS = ["wss://ws.okx.com/ws/v5/public", "wss://ws.okx.com:8443/ws/v5/pu
 const OKX_INSTRUMENT = "https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=";
 
 const TAPE_MAX = 200;
+/**
+ * Hard cap on the trailing-15m event list drawn by the chart overlay, so a liquidation flood can't
+ * grow memory or per-frame work without bound. Totals come from LiqRollup and stay exact past it.
+ */
+export const MAX_LIQUIDATIONS = 500;
+/** Dedupe ids remembered (bounded). */
+const SEEN_MAX = 5_000;
 /**
  * Binance answers restricted regions (e.g. the US) with HTTP 451 on REST, while its WebSocket
  * still opens and then sends nothing. A per-symbol stream can also be quiet for a long time
@@ -121,7 +127,8 @@ export class LiquidationFeed {
   private listeners = new Set<() => void>();
   private eventListeners = new Set<(events: readonly LiqEvent[]) => void>();
   private sockets: ReconnectingSocket[] = [];
-  private window: LiqEvent[] = []; // trailing 15m, oldest first
+  private window: LiqEvent[] = []; // trailing 15m, oldest first, capped at MAX_LIQUIDATIONS
+  private rollup = new LiqRollup(); // exact trailing-15m totals in bounded memory
   private tape: LiqEvent[] = []; // newest first, capped
   private seen = new Set<string>();
   private session: LiqTotals = { longUsd: 0, shortUsd: 0, count: 0 };
@@ -272,11 +279,14 @@ export class LiquidationFeed {
       if (e.side === "LONG") this.session.longUsd += e.usd;
       else this.session.shortUsd += e.usd;
       this.tape.unshift(e);
-      if (e.ts >= cutoff) this.window.push(e);
+      if (this.tape.length > TAPE_MAX) this.tape.pop();
+      if (e.ts >= cutoff) {
+        insertByTs(this.window, e);
+        if (this.window.length > MAX_LIQUIDATIONS) this.window.shift(); // keep the newest; bounds insert cost too
+        this.rollup.add(e);
+      }
     }
-    if (this.tape.length > TAPE_MAX) this.tape.length = TAPE_MAX;
-    this.window.sort((a, b) => a.ts - b.ts);
-    if (this.seen.size > 5_000) this.seen = new Set(this.tape.map((e) => e.id));
+    if (this.seen.size > SEEN_MAX) this.seen = new Set([...this.tape, ...this.window].map((e) => e.id));
     if (fresh.length === 0) return;
     this.dirty = true;
     for (const fn of this.eventListeners) {
@@ -294,16 +304,22 @@ export class LiquidationFeed {
     let i = 0;
     while (i < this.window.length && this.window[i].ts < cutoff) i++;
     if (i > 0) this.window.splice(0, i);
-    return i > 0;
+    const rolled = this.rollup.prune(cutoff);
+    return i > 0 || rolled;
+  }
+
+  /** Sizes of every rolling buffer (diagnostics and the flood test). */
+  bufferSizes() {
+    return { window: this.window.length, tape: this.tape.length, seen: this.seen.size, buckets: this.rollup.size };
   }
 
   private build(): LiquidationSnapshot {
     const cutoff = Date.now() - WINDOW_15M_MS;
-    const totals = totalsSince(this.window, cutoff);
+    const { vwap, ...totals } = this.rollup.totals(cutoff);
     return {
       shortLiqUsd15m: totals.shortUsd,
       longLiqUsd15m: totals.longUsd,
-      liqVwap15m: liquidationVwap(this.window, cutoff),
+      liqVwap15m: vwap,
       base: this.base,
       status: this.status,
       notes: this.notes,
@@ -320,6 +336,14 @@ export class LiquidationFeed {
     this.snap = this.build();
     for (const l of this.listeners) l();
   }
+}
+
+/** Inserts into an ascending-by-ts array. Feeds are nearly in order, so this is O(1) amortized (no full re-sort). */
+function insertByTs(arr: LiqEvent[], e: LiqEvent): void {
+  let i = arr.length;
+  while (i > 0 && arr[i - 1].ts > e.ts) i--;
+  if (i === arr.length) arr.push(e);
+  else arr.splice(i, 0, e);
 }
 
 export { EXCHANGES };

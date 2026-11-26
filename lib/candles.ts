@@ -1,8 +1,11 @@
+import { finiteNum, MAX_QTY, priceNum, saneTs } from "./sanitize.ts";
 import type { Candle, ContractKline } from "./types.ts";
 
 export const MIN1_MS = 60_000;
 export const MIN1_KEEP = 60;
 export const SEC1_KEEP = 180; // 3 minutes
+/** Hard cap on 1S candles (alias of SEC1_KEEP, named for the security audit's buffer table). */
+export const MAX_1S_CANDLES = SEC1_KEEP;
 
 export function fromContractKline(k: ContractKline): Candle {
   return { t: k.timestamp, o: k.open, h: k.high, l: k.low, c: k.close, v: k.vol, a: k.amount };
@@ -20,15 +23,26 @@ const n = (v: unknown): number | null => (typeof v === "number" && Number.isFini
  * push.kline data: {"symbol","interval":"Min1","t":<sec>,"o","c","h","l","a":<USDT>,"q":<contracts>}.
  * The spec names the volume field `v`. MEXC actually sends `q`, so both are accepted.
  */
-export function parseKlinePush(data: unknown): Candle | null {
+export function parseKlinePush(data: unknown, now = Date.now()): Candle | null {
   if (!isObj(data)) return null;
-  const t = n(data.t);
-  const o = n(data.o);
-  const h = n(data.h);
-  const l = n(data.l);
-  const c = n(data.c);
-  if (t === null || o === null || h === null || l === null || c === null || o <= 0 || c <= 0) return null;
-  return { t: t < 1e12 ? t * 1000 : t, o, h, l, c, v: n(data.q) ?? n(data.v) ?? 0, a: n(data.a) ?? 0 };
+  const rawT = n(data.t);
+  const o = priceNum(data.o);
+  const h = priceNum(data.h);
+  const l = priceNum(data.l);
+  const c = priceNum(data.c);
+  if (rawT === null || o === null || h === null || l === null || c === null) return null;
+  // An inverted range is a corrupt bar. A far-future minute would become the "latest" candle and
+  // every real candle after it would be discarded as late, freezing the chart.
+  if (h < Math.max(o, c, l) || l > Math.min(o, c)) return null;
+  const t = rawT < 1e12 ? rawT * 1000 : rawT;
+  if (!saneTs(t, now)) return null;
+  return { t, o, h, l, c, v: nonNeg(data.q) ?? nonNeg(data.v) ?? 0, a: nonNeg(data.a) ?? 0 };
+}
+
+/** Finite and in [0, MAX_QTY·MAX_PRICE], else null. */
+function nonNeg(v: unknown): number | null {
+  const x = finiteNum(v);
+  return x !== null && x >= 0 && x <= MAX_QTY * 1e6 ? x : null;
 }
 
 export interface Trade {
@@ -46,18 +60,20 @@ export interface Trade {
 }
 
 /** push.deal data: {"p":60417.5,"v":1,"T":2,"O":1,"M":2,"t":1795296368642}. MEXC may also batch it as an array. */
-export function parseDealPush(data: unknown): Trade[] {
+export function parseDealPush(data: unknown, now = Date.now()): Trade[] {
   const rows = Array.isArray(data) ? data : [data];
   const out: Trade[] = [];
   for (const d of rows) {
     if (!isObj(d)) continue;
-    const p = n(d.p);
+    const p = priceNum(d.p);
     const v = n(d.v);
     const t = n(d.t);
-    if (p === null || v === null || t === null || p <= 0 || v < 0) continue;
-    const id = typeof d.i === "string" || typeof d.i === "number" ? String(d.i) : undefined;
+    // A far-future trade would push the 10S/1S builders hours ahead and drop every real trade after it.
+    if (p === null || v === null || t === null || v < 0 || v > MAX_QTY || !saneTs(t, now)) continue;
+    const id =
+      (typeof d.i === "string" && d.i.length <= 64) || typeof d.i === "number" ? String(d.i) : undefined;
     const o = n(d.O);
-    out.push({ p, v, T: n(d.T) ?? 0, O: o === 1 || o === 2 || o === 3 ? o : 3, t, id });
+    out.push({ p, v, T: d.T === 2 ? 2 : 1, O: o === 1 || o === 2 || o === 3 ? o : 3, t, id });
   }
   return out;
 }
@@ -117,8 +133,10 @@ export class TradeCandleBuilder {
   }
 
   addTrade(tr: Trade): void {
+    if (!Number.isFinite(tr.t) || !(tr.p > 0) || !Number.isFinite(tr.p) || !(tr.v >= 0) || !Number.isFinite(tr.v)) return;
     const b = bucketStart(tr.t, this.bucketMs);
-    const turnover = this.contractSize ? tr.p * tr.v * this.contractSize : 0;
+    const raw = this.contractSize ? tr.p * tr.v * this.contractSize : 0;
+    const turnover = Number.isFinite(raw) ? raw : 0;
     const last = this.candles[this.candles.length - 1];
 
     if (last && b < last.t) {

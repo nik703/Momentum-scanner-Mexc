@@ -1,3 +1,4 @@
+import { MAX_NOTIONAL_USD, MAX_QTY, positiveNum, priceNum, safeJsonParse, saneTs } from "./sanitize.ts";
 import { stripMultiplier } from "./symbol.ts";
 
 export type Exchange = "BN" | "BYB" | "OKX";
@@ -31,23 +32,32 @@ export const WINDOW_15M_MS = 15 * 60 * 1000;
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | null => (typeof v === "string" ? v : typeof v === "number" ? String(v) : null);
-const posNum = (v: unknown): number | null => {
-  const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseFloat(v) : Number.NaN;
-  return Number.isFinite(n) && n > 0 ? n : null;
-};
+const posNum = (v: unknown): number | null => positiveNum(v);
+const qtyNum = (v: unknown): number | null => positiveNum(v, MAX_QTY);
 
-/** Accepts a raw JSON string or an already-parsed value. Returns null for non-JSON frames such as "pong". */
+/**
+ * Accepts a raw JSON string or an already-parsed value. Returns undefined for non-JSON frames such
+ * as "pong", oversized frames, and strips __proto__/constructor/prototype keys.
+ */
 function parse(raw: unknown): unknown {
-  if (typeof raw !== "string") return raw;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  return typeof raw === "string" ? safeJsonParse(raw) : raw;
 }
+
+/** Exchange event time, or the local receive time when the exchange's value is missing or absurd. */
+function eventTs(candidates: readonly unknown[], receivedAt: number): number {
+  for (const c of candidates) {
+    const n = posNum(c);
+    if (n !== null && saneTs(n, receivedAt)) return n;
+  }
+  return receivedAt;
+}
+
+/** A notional is kept only when it is finite and physically plausible. */
+const saneUsd = (usd: number): boolean => Number.isFinite(usd) && usd > 0 && usd <= MAX_NOTIONAL_USD;
 
 /** Normalized base of an exchange instrument code, e.g. "1000PEPEUSDT" -> "PEPE", "BTCUSD_PERP" -> "BTC". */
 export function instrumentBase(code: string): string {
+  if (code.length > 40) return "";
   const c = code.toUpperCase();
   const m = /^([A-Z0-9]+?)(?:USDT|USDC|USD_PERP)$/.exec(c) ?? /^([A-Z0-9]+)-(?:USDT|USDC|USD)-SWAP$/.exec(c);
   return m ? stripMultiplier(m[1]) : "";
@@ -71,10 +81,11 @@ export function parseBinanceForceOrder(raw: unknown, base: string): LiqEvent[] {
     if (!s || instrumentBase(s) !== base) continue;
     const side = o.S === "SELL" ? "LONG" : o.S === "BUY" ? "SHORT" : null;
     // Average fill price is preferred. If ap is "0", fall back to the order price.
-    const price = posNum(o.ap) ?? posNum(o.p);
-    const qty = posNum(o.q);
-    if (!side || !price || !qty) continue;
-    const ts = posNum(o.T) ?? posNum(f.E) ?? Date.now();
+    const price = priceNum(o.ap) ?? priceNum(o.p);
+    const qty = qtyNum(o.q);
+    if (!side || !price || !qty || !saneUsd(price * qty)) continue;
+    const receivedAt = Date.now();
+    const ts = eventTs([o.T, f.E], receivedAt);
     out.push({
       id: `BN:${s}:${ts}:${o.S}:${qty}`,
       exchange: "BN",
@@ -83,7 +94,7 @@ export function parseBinanceForceOrder(raw: unknown, base: string): LiqEvent[] {
       usd: price * qty,
       price,
       ts,
-      receivedAt: Date.now(),
+      receivedAt,
     });
   }
   return out;
@@ -105,10 +116,11 @@ export function parseBybitLiquidation(raw: unknown, base: string): LiqEvent[] {
     const s = str(d.s);
     if (!s || instrumentBase(s) !== base) continue;
     const side = d.S === "Buy" ? "LONG" : d.S === "Sell" ? "SHORT" : null;
-    const price = posNum(d.p);
-    const qty = posNum(d.v);
-    if (!side || !price || !qty) continue;
-    const ts = posNum(d.T) ?? posNum(msg.ts) ?? Date.now();
+    const price = priceNum(d.p);
+    const qty = qtyNum(d.v);
+    if (!side || !price || !qty || !saneUsd(price * qty)) continue;
+    const receivedAt = Date.now();
+    const ts = eventTs([d.T, msg.ts], receivedAt);
     out.push({
       id: `BYB:${s}:${ts}:${d.S}:${qty}`,
       exchange: "BYB",
@@ -117,7 +129,7 @@ export function parseBybitLiquidation(raw: unknown, base: string): LiqEvent[] {
       usd: price * qty,
       price,
       ts,
-      receivedAt: Date.now(),
+      receivedAt,
     });
   }
   return out;
@@ -144,7 +156,7 @@ export function parseOkxInstruments(raw: unknown): Map<string, OkxContractSpec> 
   for (const d of msg.data) {
     if (!isObj(d)) continue;
     const id = str(d.instId);
-    const ctVal = posNum(d.ctVal);
+    const ctVal = positiveNum(d.ctVal, 1e9);
     if (!id || !ctVal) continue;
     map.set(id, { ctVal, inverse: d.ctType === "inverse" || d.ctValCcy === "USD" });
   }
@@ -173,19 +185,22 @@ export function parseOkxLiquidation(raw: unknown, base: string, ctVals: OkxCtVal
     for (const x of d.details) {
       if (!isObj(x)) continue;
       const side = x.side === "sell" ? "LONG" : x.side === "buy" ? "SHORT" : null;
-      const sz = posNum(x.sz);
-      const px = posNum(x.bkPx);
+      const sz = qtyNum(x.sz);
+      const px = priceNum(x.bkPx);
       if (!side || !sz || !px) continue;
-      const ts = posNum(x.ts) ?? Date.now();
+      const usd = okxNotionalUsd(sz, px, spec);
+      if (!saneUsd(usd)) continue;
+      const receivedAt = Date.now();
+      const ts = eventTs([x.ts], receivedAt);
       out.push({
         id: `OKX:${instId}:${ts}:${x.side}:${sz}`,
         exchange: "OKX",
         side,
         instrument: instId,
-        usd: okxNotionalUsd(sz, px, spec),
+        usd,
         price: px,
         ts,
-        receivedAt: Date.now(),
+        receivedAt,
       });
     }
   }
@@ -228,6 +243,70 @@ export function totalsSince(events: readonly LiqEvent[], since: number): LiqTota
 }
 
 /**
+ * Exact trailing-window liquidation totals in bounded memory: per-second buckets (≤ ~1,200 for a
+ * 15-minute window plus clock skew) instead of one entry per event. The event list the chart draws
+ * can then be hard-capped without the gauge's totals drifting during a liquidation cascade.
+ */
+export class LiqRollup {
+  static readonly MAX_BUCKETS = 1_200;
+  private buckets = new Map<number, { longUsd: number; shortUsd: number; count: number; pv: number }>();
+
+  add(e: LiqEvent): void {
+    if (!(e.usd > 0) || !Number.isFinite(e.usd) || !(e.price > 0)) return;
+    const k = Math.floor(e.ts / 1000);
+    let b = this.buckets.get(k);
+    if (!b) {
+      if (this.buckets.size >= LiqRollup.MAX_BUCKETS) this.dropOldest();
+      this.buckets.set(k, (b = { longUsd: 0, shortUsd: 0, count: 0, pv: 0 }));
+    }
+    if (e.side === "LONG") b.longUsd += e.usd;
+    else b.shortUsd += e.usd;
+    b.count++;
+    b.pv += e.price * e.usd;
+  }
+
+  /** Drops buckets that end before `cutoff`. Returns whether anything was removed. */
+  prune(cutoff: number): boolean {
+    const minKey = Math.floor(cutoff / 1000);
+    let removed = false;
+    for (const k of this.buckets.keys()) {
+      if (k < minKey) {
+        this.buckets.delete(k);
+        removed = true;
+      }
+    }
+    return removed;
+  }
+
+  get size(): number {
+    return this.buckets.size;
+  }
+
+  totals(since: number): LiqTotals & { vwap: number } {
+    const minKey = Math.floor(since / 1000);
+    let longUsd = 0;
+    let shortUsd = 0;
+    let count = 0;
+    let pv = 0;
+    for (const [k, b] of this.buckets) {
+      if (k < minKey) continue;
+      longUsd += b.longUsd;
+      shortUsd += b.shortUsd;
+      count += b.count;
+      pv += b.pv;
+    }
+    const usd = longUsd + shortUsd;
+    return { longUsd, shortUsd, count, vwap: usd > 0 ? pv / usd : 0 };
+  }
+
+  private dropOldest() {
+    let min = Number.POSITIVE_INFINITY;
+    for (const k of this.buckets.keys()) if (k < min) min = k;
+    this.buckets.delete(min);
+  }
+}
+
+/**
  * Sides to sonify for a batch of freshly received events. Only events received at or after
  * `openedAt` (drawer open, or contract switch, which remounts the drawer) count, and nothing
  * plays when sound is off. Returns sides in arrival order.
@@ -235,6 +314,12 @@ export function totalsSince(events: readonly LiqEvent[], since: number): LiqTota
 export function selectLivePings(events: readonly LiqEvent[], openedAt: number, soundEnabled: boolean): LiqSide[] {
   if (!soundEnabled || openedAt <= 0) return [];
   const out: LiqSide[] = [];
-  for (const e of events) if (e.receivedAt >= openedAt) out.push(e.side);
+  for (const e of events) {
+    if (e.receivedAt >= openedAt) out.push(e.side);
+    if (out.length >= MAX_PINGS_PER_BATCH) break; // the audio backlog would drop the rest anyway
+  }
   return out;
 }
+
+/** A flood frame can carry thousands of events; only this many are ever handed to the audio scheduler. */
+export const MAX_PINGS_PER_BATCH = 32;

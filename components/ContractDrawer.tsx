@@ -17,6 +17,7 @@ import type { ContractSnapshot } from "@/lib/contractFeed";
 import { fmtPct, fmtUsd1, makePriceFormatter } from "@/lib/format";
 import type { ContractTicker } from "@/lib/types";
 import { DirectionalBiasBar } from "./DirectionalBiasBar";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { LiquidationsPanel } from "./LiquidationsPanel";
 import { MicroChart, type ChartTimeframe } from "./MicroChart";
 import { SettingsAction, SettingsDivider, SettingsPopover, SettingsRow, SettingsSwitch, VolumeControl } from "./SettingsPopover";
@@ -264,7 +265,7 @@ export function ContractDrawer({ symbol, onClose }: { symbol: string; onClose: (
           />
         )}
         <a
-          href={`https://futures.mexc.com/exchange/${symbol}`}
+          href={`https://futures.mexc.com/exchange/${encodeURIComponent(symbol)}`}
           target="_blank"
           rel="noopener noreferrer"
           className="ml-auto inline-flex h-7 items-center rounded-[3px] border border-line px-2 text-[11px] text-fg-2 hover:text-fg"
@@ -295,7 +296,19 @@ export function ContractDrawer({ symbol, onClose }: { symbol: string; onClose: (
           </div>
         ) : (
           // Mounted only for a valid contract, so a 404 never opens liquidation sockets.
-          <InspectorBody symbol={symbol} feed={feed} drawerOpenedAtRef={drawerOpenedAtRef} />
+          <ErrorBoundary
+            resetKey={symbol}
+            fallback={(reset) => (
+              <div role="alert" className="m-3 border border-line px-3 py-3 text-[12px] text-fg-2" data-testid="drawer-crash">
+                <div className="font-semibold text-fg">This panel hit unexpected data and was paused.</div>
+                <button type="button" onClick={reset} className="mt-2 rounded-[3px] border border-line px-2 py-1 text-[11px] hover:text-fg">
+                  Retry
+                </button>
+              </div>
+            )}
+          >
+            <InspectorBody symbol={symbol} feed={feed} drawerOpenedAtRef={drawerOpenedAtRef} />
+          </ErrorBoundary>
         )}
       </div>
     </aside>

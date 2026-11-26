@@ -7,12 +7,20 @@ import type {
   ContractTrade,
   UniverseItem,
 } from "./types.ts";
+import { fetchJsonBounded, UPSTREAM_TIMEOUT_MS } from "./server/upstream.ts";
+import { MAX_QTY, priceNum, saneTs } from "./sanitize.ts";
+import { isContractSymbol } from "./symbol.ts";
 
 const BASE = "https://contract.mexc.com/api/v1/contract";
 const TOP_N = 150;
 const CONCURRENCY = 15;
 const KLINE_LIMIT = 24;
-const TIMEOUT_MS = 6000;
+/**
+ * Wall-clock budget for one bootstrap build. Each request already times out after 5s, but 150 klines
+ * at concurrency 15 with one retry could otherwise take ~100s against a stalled upstream and blow
+ * through the function's maxDuration (30s). Klines still pending at the deadline count as failed.
+ */
+export const BOOTSTRAP_BUDGET_MS = 20_000;
 
 interface RawTicker {
   symbol: string;
@@ -53,28 +61,23 @@ interface MexcEnvelope<T> {
   data: T;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: { accept: "application/json" },
-    });
-  } catch (e) {
-    const timedOut = e instanceof DOMException && e.name === "TimeoutError";
-    throw new MexcError(timedOut ? "MEXC request timed out" : "MEXC unreachable", null);
+/**
+ * One MEXC REST call: bounded fetch (5s timeout incl. body, JSON content-type, 4MB cap) plus the
+ * MEXC envelope check. Transport failures throw UpstreamError; business errors throw MexcError.
+ */
+async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const body = await fetchJsonBounded<MexcEnvelope<T>>(url, { label: "MEXC", signal, timeoutMs: UPSTREAM_TIMEOUT_MS });
+  if (typeof body !== "object" || body === null || typeof body.success !== "boolean") {
+    throw new MexcError("MEXC returned an unexpected payload", null);
   }
-  if (!res.ok) throw new MexcError(`MEXC HTTP ${res.status}`, null, res.status);
-  let body: MexcEnvelope<T>;
-  try {
-    body = (await res.json()) as MexcEnvelope<T>;
-  } catch {
-    throw new MexcError("MEXC returned invalid JSON", null, res.status);
+  if (!body.success) {
+    const msg = typeof body.message === "string" ? body.message.slice(0, 200) : `MEXC error ${String(body.code)}`;
+    throw new MexcError(msg, typeof body.code === "number" ? body.code : null);
   }
-  if (!body.success) throw new MexcError(body.message ?? `MEXC error ${body.code}`, body.code ?? null);
   return body.data;
 }
+
+const isFiniteArray = (a: unknown): a is number[] => Array.isArray(a) && a.every((x) => typeof x === "number" && Number.isFinite(x));
 
 /** Runs `fn` over `items` with at most `limit` promises in flight. */
 export async function mapLimit<T, R>(
@@ -98,42 +101,62 @@ export async function mapLimit<T, R>(
   return out;
 }
 
-async function fetchKline(symbol: string): Promise<RawKline> {
+async function fetchKline(symbol: string, deadline: AbortSignal): Promise<RawKline> {
   const url = `${BASE}/kline/${encodeURIComponent(symbol)}?interval=Min5&limit=${KLINE_LIMIT}`;
+  if (deadline.aborted) throw new MexcError("Bootstrap budget exhausted", null);
   try {
-    return await getJson<RawKline>(url);
-  } catch {
+    return await getJson<RawKline>(url, deadline);
+  } catch (e) {
+    if (deadline.aborted) throw e;
     // One retry with a short pause absorbs transient 5xx / rate-limit blips.
     await new Promise((r) => setTimeout(r, 250));
-    return getJson<RawKline>(url);
+    return getJson<RawKline>(url, deadline);
   }
 }
 
+/** Ticker rows with a canonical symbol and finite, positive numbers (anything else is dropped). */
+function validTickers(raw: unknown): RawTickerFull[] {
+  if (!Array.isArray(raw)) throw new MexcError("MEXC returned an unexpected ticker payload", null);
+  return raw.filter(
+    (t): t is RawTickerFull =>
+      typeof t === "object" &&
+      t !== null &&
+      typeof t.symbol === "string" &&
+      isContractSymbol(t.symbol) &&
+      priceNum(t.lastPrice) !== null &&
+      Number.isFinite(t.amount24) &&
+      t.amount24 >= 0 &&
+      Number.isFinite(t.volume24 ?? 0),
+  );
+}
+
 export async function buildBootstrap(): Promise<BootstrapPayload> {
-  const tickers = await getJson<RawTicker[]>(`${BASE}/ticker`);
+  const deadline = AbortSignal.timeout(BOOTSTRAP_BUDGET_MS);
+  const tickers = validTickers(await getJson<unknown>(`${BASE}/ticker`, deadline));
   const top = tickers
-    .filter((t) => t.symbol.endsWith("_USDT") && t.amount24 > 0 && t.lastPrice > 0)
+    .filter((t) => t.amount24 > 0)
     .sort((a, b) => b.amount24 - a.amount24)
     .slice(0, TOP_N);
 
-  const results = await mapLimit(top, CONCURRENCY, (t) => fetchKline(t.symbol));
+  const results = await mapLimit(top, CONCURRENCY, (t) => fetchKline(t.symbol, deadline));
 
   const symbols: BootstrapSymbol[] = [];
   let failed = 0;
   results.forEach((r, i) => {
     const tk = top[i];
-    if (r.status !== "fulfilled" || !r.value?.time?.length) {
+    const k = r.status === "fulfilled" ? r.value : null;
+    // Every series must be an array of finite numbers, or the contract is skipped (never NaN on the board).
+    if (!k || !isFiniteArray(k.time) || !k.time.length || !isFiniteArray(k.open) || !isFiniteArray(k.close) || !isFiniteArray(k.amount)) {
       failed++;
       return;
     }
-    const k = r.value;
     const len = Math.min(k.time.length, k.open.length, k.close.length, k.amount.length);
     const from = Math.max(0, len - KLINE_LIMIT);
     symbols.push({
       symbol: tk.symbol,
       lastPrice: tk.lastPrice,
       amount24: tk.amount24,
-      volume24: tk.volume24,
+      volume24: Number.isFinite(tk.volume24) ? tk.volume24 : 0,
       k: {
         t: k.time.slice(from, len).map((s) => s * 1000),
         o: k.open.slice(from, len),
@@ -207,12 +230,13 @@ export function normalizeDeals(raw: unknown): ContractTrade[] {
   const out: ContractTrade[] = [];
   for (const d of raw as RawDeal[]) {
     if (!d || typeof d !== "object") continue;
-    const price = num(d.p, Number.NaN);
+    const price = priceNum(d.p);
     const vol = num(d.v, Number.NaN);
     const ts = num(d.t, Number.NaN);
-    if (!(price > 0) || !(vol >= 0) || !(ts > 0)) continue;
+    if (price === null || !(vol >= 0) || vol > MAX_QTY || !saneTs(ts)) continue;
+    const id = (typeof d.i === "string" && d.i.length <= 64) || typeof d.i === "number" ? String(d.i) : null;
     out.push({
-      id: d.i !== undefined ? String(d.i) : `${ts}:${price}:${vol}`,
+      id: id ?? `${ts}:${price}:${vol}`,
       price,
       vol,
       side: d.T === 2 ? 2 : 1,
@@ -260,6 +284,7 @@ export async function fetchContractDetail(symbol: string): Promise<ContractDetai
   };
 
   const k = klineR.value;
+  if (typeof k !== "object" || k === null) throw new MexcError("MEXC returned an unexpected kline payload", null);
   const len = Math.min(
     k.time?.length ?? 0,
     k.open?.length ?? 0,
@@ -271,6 +296,8 @@ export async function fetchContractDetail(symbol: string): Promise<ContractDetai
   );
   const klines: ContractKline[] = [];
   for (let i = Math.max(0, len - 60); i < len; i++) {
+    const row = [k.time[i], k.open[i], k.high[i], k.low[i], k.close[i], k.vol[i], k.amount[i]];
+    if (!row.every((x) => typeof x === "number" && Number.isFinite(x)) || !(k.open[i] > 0) || !(k.close[i] > 0)) continue;
     klines.push({
       timestamp: k.time[i] * 1000,
       open: k.open[i],
@@ -282,12 +309,14 @@ export async function fetchContractDetail(symbol: string): Promise<ContractDetai
     });
   }
 
-  const info = infoR.status === "fulfilled" ? infoR.value : null;
+  const infoRaw = infoR.status === "fulfilled" ? infoR.value : null;
+  const info = typeof infoRaw === "object" && infoRaw !== null ? infoRaw : null;
   return {
     symbol,
-    baseCoin: info?.baseCoin ?? symbol.replace(/_USDT$/, ""),
-    contractSize: info && info.contractSize > 0 ? info.contractSize : null,
-    priceScale: info && Number.isInteger(info.priceScale) ? info.priceScale : null,
+    baseCoin:
+      typeof info?.baseCoin === "string" && /^[A-Z0-9]{1,20}$/.test(info.baseCoin) ? info.baseCoin : symbol.replace(/_USDT$/, ""),
+    contractSize: info && Number.isFinite(info.contractSize) && info.contractSize > 0 ? info.contractSize : null,
+    priceScale: info && Number.isInteger(info.priceScale) && info.priceScale >= 0 && info.priceScale <= 12 ? info.priceScale : null,
     ticker,
     klines,
     trades: dealsR.status === "fulfilled" ? normalizeDeals(dealsR.value) : [],
@@ -297,9 +326,8 @@ export async function fetchContractDetail(symbol: string): Promise<ContractDetai
 
 /** Every active *_USDT perpetual, most liquid first (for the global lookup). */
 export async function fetchUniverse(): Promise<UniverseItem[]> {
-  const tickers = await getJson<RawTickerFull[]>(`${BASE}/ticker`);
+  const tickers = validTickers(await getJson<unknown>(`${BASE}/ticker`));
   return tickers
-    .filter((t) => typeof t.symbol === "string" && t.symbol.endsWith("_USDT") && t.lastPrice > 0)
     .sort((a, b) => b.amount24 - a.amount24)
     .map((t) => ({
       symbol: t.symbol,

@@ -1,5 +1,17 @@
 import { computeTf, liveDeltaTurnover, rollCandles, type SymbolState } from "./calculator.ts";
-import type { BootstrapPayload, ScannerRow, WsStatus } from "./types.ts";
+import { MAX_PRICE, priceNum } from "./sanitize.ts";
+import type { BootstrapPayload, BootstrapSymbol, ScannerRow, WsStatus } from "./types.ts";
+
+const finiteArr = (a: unknown): a is number[] => Array.isArray(a) && a.every((x) => typeof x === "number" && Number.isFinite(x));
+/** A bootstrap row is used only if every number in it is finite and the series line up. */
+function validBootstrapSymbol(s: BootstrapSymbol): boolean {
+  if (typeof s !== "object" || s === null || typeof s.symbol !== "string" || s.symbol.length > 30) return false;
+  if (priceNum(s.lastPrice) === null || !Number.isFinite(s.amount24) || !Number.isFinite(s.volume24)) return false;
+  const k = s.k;
+  if (typeof k !== "object" || k === null || !finiteArr(k.t) || !finiteArr(k.o) || !finiteArr(k.c) || !finiteArr(k.a)) return false;
+  return k.t.length > 0 && k.o.length === k.t.length && k.c.length === k.t.length && k.a.length === k.t.length;
+}
+const finiteNonNeg = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
 
 export interface ScannerSnapshot {
   rows: ScannerRow[];
@@ -92,7 +104,7 @@ export class ScannerStore {
     if (this.meta.bootstrapAt && p.generatedAt <= this.meta.bootstrapAt) return; // stale CDN copy
     const next = new Map<string, SymbolState>();
     for (const s of p.symbols) {
-      if (!s.k.t.length) continue;
+      if (!validBootstrapSymbol(s)) continue;
       const prev = this.syms.get(s.symbol);
       // Keep the freshest price: a WS tick newer than the snapshot wins.
       const price = prev && (this.meta.lastTickAt ?? 0) > p.generatedAt ? prev.price : s.lastPrice;
@@ -131,11 +143,18 @@ export class ScannerStore {
     for (const tk of ticks) {
       if (typeof tk !== "object" || tk === null || typeof tk.symbol !== "string") continue;
       const st = this.syms.get(tk.symbol);
-      if (!st || !(tk.lastPrice > 0)) continue;
-      st.price = tk.lastPrice;
-      st.liveDelta = liveDeltaTurnover(st, tk);
-      if (typeof tk.amount24 === "number") st.amount24 = tk.amount24;
-      if (typeof tk.volume24 === "number") st.volume24 = tk.volume24;
+      // 1e999 in JSON parses to Infinity; strings, NaN and absurd values are dropped too.
+      if (!st || !(typeof tk.lastPrice === "number" && Number.isFinite(tk.lastPrice) && tk.lastPrice > 0 && tk.lastPrice <= MAX_PRICE)) continue;
+      const clean: WsTicker = {
+        symbol: tk.symbol,
+        lastPrice: tk.lastPrice,
+        amount24: finiteNonNeg(tk.amount24) ? tk.amount24 : undefined,
+        volume24: finiteNonNeg(tk.volume24) ? tk.volume24 : undefined,
+      };
+      st.price = clean.lastPrice;
+      st.liveDelta = liveDeltaTurnover(st, clean);
+      if (clean.amount24 !== undefined) st.amount24 = clean.amount24;
+      if (clean.volume24 !== undefined) st.volume24 = clean.volume24;
       touched = true;
     }
     if (touched) {
